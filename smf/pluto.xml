@@ -1,0 +1,96 @@
+<?xml version="1.0"?>
+<!DOCTYPE service_bundle SYSTEM "/usr/share/lib/xml/dtd/service_bundle.dtd.1">
+<!--
+  SMF manifest for the Pluto TV → Channels DVR bridge service.
+
+  Install:
+    install -m 0444 pluto.xml /opt/local/lib/svc/manifest/network/pluto.xml
+    svccfg import /opt/local/lib/svc/manifest/network/pluto.xml
+
+  Set credentials (kept out of this world-readable file):
+    svccfg -s svc:/network/pluto:default setenv PLUTO_EMAIL user@example.com
+    svccfg -s svc:/network/pluto:default setenv PLUTO_PASSWORD secret
+
+  Enable:
+    svcadm enable svc:/network/pluto:default
+
+  View logs:
+    svcs -L svc:/network/pluto:default
+-->
+<service_bundle type="manifest" name="pluto">
+
+  <service name="network/pluto" type="service" version="1">
+
+    <create_default_instance enabled="false"/>
+    <single_instance/>
+
+    <!-- Wait for the network to be online before starting. -->
+    <dependency name="network"
+      grouping="require_all"
+      restart_on="error"
+      type="service">
+      <service_fmri value="svc:/milestone/network:default"/>
+    </dependency>
+
+    <!-- Wait for the filesystem to be ready (for device ID file). -->
+    <dependency name="filesystem"
+      grouping="require_all"
+      restart_on="none"
+      type="service">
+      <service_fmri value="svc:/system/filesystem/local:default"/>
+    </dependency>
+
+    <exec_method
+      type="method"
+      name="start"
+      exec="/opt/local/bin/pluto"
+      timeout_seconds="60">
+      <method_context>
+        <method_environment>
+          <!-- Non-sensitive defaults; override with svccfg setenv as needed. -->
+          <envvar name="PORT"          value="8080"/>
+          <envvar name="START_CHANNEL" value="10000"/>
+          <envvar name="TUNER_COUNT"   value="12"/>
+          <!-- PLUTO_EMAIL and PLUTO_PASSWORD must be set via svccfg setenv -->
+        </method_environment>
+      </method_context>
+    </exec_method>
+
+    <!-- :kill -TERM sends SIGTERM to the process group, triggering graceful shutdown. -->
+    <exec_method
+      type="method"
+      name="stop"
+      exec=":kill -TERM"
+      timeout_seconds="35"/>
+
+    <exec_method
+      type="method"
+      name="refresh"
+      exec=":true"
+      timeout_seconds="0"/>
+
+    <property_group name="startd" type="framework">
+      <!--
+        Prevent SMF from marking the service faulted when the process exits
+        due to a signal (e.g. svcadm disable sends SIGTERM).
+      -->
+      <propval name="ignore_error" type="astring" value="core,signal"/>
+    </property_group>
+
+    <stability value="Unstable"/>
+
+    <template>
+      <common_name>
+        <loctext xml:lang="C">Pluto TV for Channels DVR</loctext>
+      </common_name>
+      <description>
+        <loctext xml:lang="C">
+          Serves M3U playlists and XMLTV EPG data from Pluto TV
+          for consumption by Channels DVR Server as custom channels.
+        </loctext>
+      </description>
+    </template>
+
+  </service>
+
+</service_bundle>
