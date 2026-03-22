@@ -145,57 +145,448 @@ func formatTime(t time.Time) string {
 var indexTmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Pluto for Channels</title>
-<style>
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-         background: #0f1117; color: #e2e8f0; margin: 0; padding: 2rem; }
-  h1   { color: #fff; margin-bottom: 0.25rem; }
-  .sub { color: #94a3b8; margin-top: 0; margin-bottom: 2rem; }
-  .card { background: #1e2330; border-radius: 8px; padding: 1.25rem 1.5rem;
-          margin-bottom: 1.25rem; }
-  .card h2 { margin: 0 0 1rem; font-size: 0.85rem; text-transform: uppercase;
-              letter-spacing: 0.08em; color: #64748b; }
-  .badge { display: inline-block; padding: 0.2rem 0.55rem; border-radius: 4px;
-           font-size: 0.8rem; font-weight: 600; }
-  .badge.ready  { background: #14532d; color: #86efac; }
-  .badge.wait   { background: #451a03; color: #fdba74; }
-  table { border-collapse: collapse; width: 100%; }
-  td    { padding: 0.4rem 0; vertical-align: top; }
-  td:first-child { color: #94a3b8; width: 9rem; }
-  a  { color: #60a5fa; text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  .tuner-list { display: flex; flex-direction: column; gap: 0.4rem; }
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pluto for Channels</title>
+  <style>
+    :root {
+      --bg-black: #000000;
+      --bg-card: #1D1D1D;
+      --bg-card-hover: #2A2A2A;
+      --accent-yellow: #FFF200;
+      --accent-purple: #7334F4;
+      --text-primary: #FFFFFF;
+      --text-muted: #A1A1A1;
+      --border-radius: 12px;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      background-color: var(--bg-black);
+      color: var(--text-primary);
+      min-height: 100vh;
+      line-height: 1.6;
+    }
+
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 40px 24px;
+    }
+
+    /* Header */
+    .header {
+      text-align: center;
+      margin-bottom: 48px;
+    }
+
+    .logo {
+      font-size: 2.5rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      margin-bottom: 16px;
+    }
+
+    .logo-pluto {
+      color: var(--accent-yellow);
+    }
+
+    .version-badge {
+      display: inline-block;
+      background: var(--bg-card);
+      color: var(--accent-yellow);
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 0.875rem;
+      font-weight: 600;
+      margin-right: 8px;
+    }
+
+    .timestamp {
+      color: var(--text-muted);
+      font-size: 0.875rem;
+      margin-top: 12px;
+    }
+
+    /* Section titles */
+    .section-title {
+      font-size: 1.25rem;
+      font-weight: 700;
+      margin-bottom: 8px;
+      color: var(--text-primary);
+    }
+
+    .section-subtitle {
+      color: var(--text-muted);
+      font-size: 0.875rem;
+      margin-bottom: 16px;
+    }
+
+    /* Tuner Grid */
+    .tuner-section {
+      margin-bottom: 40px;
+    }
+
+    .tuner-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+      gap: 12px;
+    }
+
+    .tuner-card {
+      background: var(--bg-card);
+      border-radius: var(--border-radius);
+      padding: 16px;
+      text-align: center;
+      text-decoration: none;
+      color: var(--text-primary);
+      transition: all 0.2s ease;
+      border: 2px solid transparent;
+    }
+
+    .tuner-card:hover {
+      background: var(--bg-card-hover);
+      border-color: var(--accent-yellow);
+      transform: translateY(-2px);
+    }
+
+    .tuner-number {
+      width: 36px;
+      height: 36px;
+      background: var(--accent-yellow);
+      color: var(--bg-black);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.125rem;
+      font-weight: 800;
+      margin: 0 auto 8px;
+    }
+
+    .tuner-label {
+      font-weight: 600;
+      font-size: 0.875rem;
+    }
+
+    .tuner-file {
+      color: var(--text-muted);
+      font-size: 0.7rem;
+      margin-top: 4px;
+    }
+
+    .tuner-card.copied {
+      border-color: #4CAF50;
+      background: #1a2e1a;
+    }
+
+    .tuner-card.copied .tuner-file {
+      color: #4CAF50;
+    }
+
+    /* EPG Section */
+    .epg-section {
+      margin-bottom: 40px;
+    }
+
+    .epg-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      background: var(--accent-yellow);
+      color: var(--bg-black);
+      padding: 16px 32px;
+      border-radius: var(--border-radius);
+      font-size: 1.125rem;
+      font-weight: 700;
+      text-decoration: none;
+      transition: all 0.2s ease;
+      width: 100%;
+      max-width: 300px;
+    }
+
+    .epg-button:hover {
+      background: var(--accent-purple);
+      color: var(--text-primary);
+      transform: translateY(-2px);
+    }
+
+    .epg-button.copied {
+      background: #4CAF50;
+    }
+
+    .epg-button svg {
+      width: 24px;
+      height: 24px;
+    }
+
+    /* Setup Instructions */
+    .setup-section {
+      background: var(--bg-card);
+      border-radius: var(--border-radius);
+      padding: 32px;
+      margin-bottom: 40px;
+    }
+
+    .setup-title {
+      font-size: 1.25rem;
+      font-weight: 700;
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .setup-title svg {
+      color: var(--accent-yellow);
+      width: 24px;
+      height: 24px;
+    }
+
+    .setup-steps {
+      list-style: none;
+    }
+
+    .setup-step {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .setup-step:last-child {
+      margin-bottom: 0;
+    }
+
+    .step-number {
+      flex-shrink: 0;
+      width: 28px;
+      height: 28px;
+      background: var(--accent-yellow);
+      color: var(--bg-black);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.875rem;
+      font-weight: 700;
+    }
+
+    .step-content {
+      padding-top: 2px;
+    }
+
+    .step-content strong {
+      color: var(--text-primary);
+    }
+
+    .step-content p {
+      color: var(--text-muted);
+      font-size: 0.875rem;
+      margin-top: 4px;
+    }
+
+    /* Footer */
+    .footer {
+      text-align: center;
+      padding-top: 24px;
+      border-top: 1px solid var(--bg-card);
+    }
+
+    .footer-link {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 0.875rem;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: color 0.2s ease;
+    }
+
+    .footer-link:hover {
+      color: var(--accent-yellow);
+    }
+
+    .footer-link svg {
+      width: 18px;
+      height: 18px;
+    }
+
+    /* Responsive */
+    @media (max-width: 600px) {
+      .container {
+        padding: 24px 16px;
+      }
+
+      .logo {
+        font-size: 1.75rem;
+      }
+
+      .tuner-grid {
+        grid-template-columns: repeat(3, 1fr);
+        gap: 10px;
+      }
+
+      .tuner-card {
+        padding: 12px;
+      }
+
+      .tuner-number {
+        width: 32px;
+        height: 32px;
+        font-size: 1rem;
+      }
+
+      .setup-section {
+        padding: 20px;
+      }
+    }
+  </style>
 </head>
 <body>
-<h1>Pluto for Channels</h1>
-<p class="sub">Pluto TV &rarr; Channels DVR bridge &nbsp;&bull;&nbsp; v{{.Version}}</p>
+  <div class="container">
+    <!-- Header -->
+    <header class="header">
+      <h1 class="logo">
+        <span class="logo-pluto">Pluto</span> for Channels
+      </h1>
+      <div>
+        <span class="version-badge">v{{.Version}}</span>
+      </div>
+      {{if .LastUpdated}}<p class="timestamp">Last updated: {{.LastUpdated}}</p>{{end}}
+    </header>
 
-<div class="card">
-  <h2>Status</h2>
-  <table>
-    <tr><td>Ready</td><td>{{if .Ready}}<span class="badge ready">yes</span>{{else}}<span class="badge wait">not yet</span>{{end}}</td></tr>
-    <tr><td>Last updated</td><td>{{if .LastUpdated}}{{.LastUpdated}}{{else}}—{{end}}</td></tr>
-    <tr><td>Tuners</td><td>{{.TunerCount}}</td></tr>
-  </table>
-</div>
+    <!-- Tuner Playlists -->
+    <section class="tuner-section">
+      <h2 class="section-title">Tuner Playlists</h2>
+      <p class="section-subtitle">{{.TunerCount}} tuner{{if gt .TunerCount 1}}s{{end}} available. Click to copy URL.</p>
+      <div class="tuner-grid">
+        {{range .Tuners}}<a href="{{.Path}}" class="tuner-card"><div class="tuner-number">{{.N}}</div><div class="tuner-label">Tuner {{.N}}</div><div class="tuner-file">.m3u</div></a>
+        {{end}}
+      </div>
+    </section>
 
-<div class="card">
-  <h2>EPG / Guide Data</h2>
-  <a href="{{.EPGURL}}">{{.EPGURL}}</a>
-</div>
+    <!-- EPG -->
+    <section class="epg-section">
+      <h2 class="section-title">Electronic Program Guide</h2>
+      <a href="/epg.xml" class="epg-button" id="epg-button">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+        </svg>
+        <span>Copy EPG URL</span>
+      </a>
+    </section>
 
-<div class="card">
-  <h2>Tuner Playlists</h2>
-  <div class="tuner-list">
-    {{range .Tuners}}<div><a href="{{.}}">{{.}}</a></div>{{end}}
+    <!-- Setup Instructions -->
+    <section class="setup-section">
+      <h3 class="setup-title">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        Setup with Channels DVR Server
+      </h3>
+      <ol class="setup-steps">
+        <li class="setup-step">
+          <span class="step-number">1</span>
+          <div class="step-content">
+            <strong>Add tuners as Custom Channels sources</strong>
+            <p>Add as many tuners as you need for concurrent streams (up to {{.TunerCount}})</p>
+          </div>
+        </li>
+        <li class="setup-step">
+          <span class="step-number">2</span>
+          <div class="step-content">
+            <strong>Set Stream Limit to 1 for each source</strong>
+            <p>This ensures proper load balancing across tuners</p>
+          </div>
+        </li>
+        <li class="setup-step">
+          <span class="step-number">3</span>
+          <div class="step-content">
+            <strong>Use the shared EPG URL for all sources</strong>
+            <p>All tuners share the same channel numbers and guide data</p>
+          </div>
+        </li>
+      </ol>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <a href="https://github.com/maddox/pluto-for-channels" class="footer-link">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+        </svg>
+        View on GitHub
+      </a>
+    </footer>
   </div>
-</div>
+  <script>
+    function copyToClipboard(text) {
+      if (navigator.clipboard && window.isSecureContext) {
+        return navigator.clipboard.writeText(text);
+      }
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+      return Promise.resolve();
+    }
+
+    document.querySelectorAll('.tuner-card').forEach(card => {
+      card.addEventListener('click', async (e) => {
+        e.preventDefault();
+        const url = window.location.origin + card.getAttribute('href');
+        await copyToClipboard(url);
+
+        const fileEl = card.querySelector('.tuner-file');
+        const originalText = fileEl.textContent;
+
+        card.classList.add('copied');
+        fileEl.textContent = 'copied!';
+
+        setTimeout(() => {
+          card.classList.remove('copied');
+          fileEl.textContent = originalText;
+        }, 1500);
+      });
+    });
+
+    document.getElementById('epg-button').addEventListener('click', async (e) => {
+      e.preventDefault();
+      const btn = e.currentTarget;
+      const url = window.location.origin + btn.getAttribute('href');
+      await copyToClipboard(url);
+
+      const textEl = btn.querySelector('span');
+      const originalText = textEl.textContent;
+
+      btn.classList.add('copied');
+      textEl.textContent = 'Copied!';
+
+      setTimeout(() => {
+        btn.classList.remove('copied');
+        textEl.textContent = originalText;
+      }, 1500);
+    });
+  </script>
 </body>
 </html>
 `))
+
+type tunerEntry struct {
+	N    int
+	Path string
+}
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
@@ -203,29 +594,20 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	host := r.Host
-	if host == "" {
-		host = "localhost:" + strconv.Itoa(s.cfg.Port)
-	}
-
-	tuners := make([]string, s.cfg.TunerCount)
+	tuners := make([]tunerEntry, s.cfg.TunerCount)
 	for i := 1; i <= s.cfg.TunerCount; i++ {
-		tuners[i-1] = fmt.Sprintf("http://%s/tuner%d/channels.m3u", host, i)
+		tuners[i-1] = tunerEntry{N: i, Path: fmt.Sprintf("/tuner%d/channels.m3u", i)}
 	}
 
 	data := struct {
 		Version     string
-		Ready       bool
 		LastUpdated string
 		TunerCount  int
-		EPGURL      string
-		Tuners      []string
+		Tuners      []tunerEntry
 	}{
 		Version:     s.version,
-		Ready:       s.cache.IsReady(),
 		LastUpdated: formatTime(s.cache.LastUpdated()),
 		TunerCount:  s.cfg.TunerCount,
-		EPGURL:      fmt.Sprintf("http://%s/epg.xml", host),
 		Tuners:      tuners,
 	}
 

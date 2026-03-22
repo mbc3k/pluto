@@ -29,6 +29,7 @@ RUN CGO_ENABLED=0 go build \
     -o /pluto ./cmd/pluto
 
 FROM scratch
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /pluto /pluto
 
 # /data is the writable directory for persistent state (device ID file).
