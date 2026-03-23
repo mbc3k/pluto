@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/mike/pluto/internal/pluto"
+	"github.com/mbc3k/pluto/internal/pluto"
 )
 
 // xmltvTimeFormat is the XMLTV standard date-time format.

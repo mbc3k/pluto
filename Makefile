@@ -59,7 +59,7 @@ fmt:
 vet:
 	go vet ./...
 
-## test: run all tests
+## test: run all tests (of which there are none currently)
 test:
 	go test ./...
 

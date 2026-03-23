@@ -1,3 +1,3 @@
-module github.com/mike/pluto
+module github.com/mbc3k/pluto
 
 go 1.22

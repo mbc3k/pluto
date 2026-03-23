@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mike/pluto/internal/config"
-	"github.com/mike/pluto/internal/pluto"
+	"github.com/mbc3k/pluto/internal/config"
+	"github.com/mbc3k/pluto/internal/pluto"
 )
 
 const (

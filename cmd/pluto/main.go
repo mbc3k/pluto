@@ -11,12 +11,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mike/pluto/internal/auth"
-	"github.com/mike/pluto/internal/cache"
-	"github.com/mike/pluto/internal/config"
-	"github.com/mike/pluto/internal/pluto"
-	"github.com/mike/pluto/internal/scheduler"
-	"github.com/mike/pluto/internal/server"
+	"github.com/mbc3k/pluto/internal/auth"
+	"github.com/mbc3k/pluto/internal/cache"
+	"github.com/mbc3k/pluto/internal/config"
+	"github.com/mbc3k/pluto/internal/pluto"
+	"github.com/mbc3k/pluto/internal/scheduler"
+	"github.com/mbc3k/pluto/internal/server"
 )
 
 // version is injected at build time via -ldflags "-X main.version=...".

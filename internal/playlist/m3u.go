@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mike/pluto/internal/auth"
-	"github.com/mike/pluto/internal/pluto"
+	"github.com/mbc3k/pluto/internal/auth"
+	"github.com/mbc3k/pluto/internal/pluto"
 )
 
 const stitcherBase = "https://cfd-v4-service-channel-stitcher-use1-1.prd.pluto.tv"

@@ -7,12 +7,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mike/pluto/internal/auth"
-	"github.com/mike/pluto/internal/cache"
-	"github.com/mike/pluto/internal/config"
-	"github.com/mike/pluto/internal/epg"
-	"github.com/mike/pluto/internal/playlist"
-	"github.com/mike/pluto/internal/pluto"
+	"github.com/mbc3k/pluto/internal/auth"
+	"github.com/mbc3k/pluto/internal/cache"
+	"github.com/mbc3k/pluto/internal/config"
+	"github.com/mbc3k/pluto/internal/epg"
+	"github.com/mbc3k/pluto/internal/playlist"
+	"github.com/mbc3k/pluto/internal/pluto"
 )
 
 // initialRetryDelays controls how quickly we retry if the first data fetch
