@@ -29,10 +29,13 @@ All configuration is via environment variables (or a flat `KEY=value` file at `/
 
 | Path | Description |
 |---|---|
-| `/tunerN/channels.m3u` | M3U playlist for tuner N (also `/tunerN/m3u`) |
+| `/tuner-N-playlist.m3u` | M3U playlist for tuner N (primary format) |
+| `/tunerN/channels.m3u` | M3U playlist for tuner N (legacy alias) |
+| `/tunerN/m3u` | M3U playlist for tuner N (legacy alias) |
 | `/epg.xml` | XMLTV EPG (also `/xmltv.xml`) |
 | `/health` | `200 ok` when cache is populated, `503` while warming up |
 | `/status` | JSON: version, last refresh time, tuner URLs, EPG URL |
+| `/` | Status page with links to all tuner playlists |
 
 ---
 
@@ -73,7 +76,7 @@ curl http://localhost:8080/status
 
 In Channels DVR → Settings → Sources → Add Source → M3U Playlist:
 
-- **Playlist URL:** `http://<your-mac-ip>:8080/tuner1/channels.m3u` (repeat for tuner2 through tunerN if you want multiple concurrent streams)
+- **Playlist URL:** `http://<your-mac-ip>:8080/tuner-1-playlist.m3u` (repeat for tuner-2 through tuner-N if you want multiple concurrent streams)
 - **EPG URL:** `http://<your-mac-ip>:8080/epg.xml`
 
 ---
