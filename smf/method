@@ -1,0 +1,6 @@
+#!/bin/sh
+# SMF start method for the pluto service.
+# Backgrounds the binary so this script exits immediately, allowing SMF to
+# consider the start method complete. The process remains in the SMF contract
+# and is tracked/restarted by svc.startd as normal.
+/opt/local/bin/pluto &

@@ -5,6 +5,7 @@
 
   Install:
     install -m 0444 pluto.xml /opt/local/lib/svc/manifest/network/pluto.xml
+    install -m 0555 method /opt/local/lib/svc/method/pluto
     svccfg import /opt/local/lib/svc/manifest/network/pluto.xml
 
   Set credentials (kept out of this world-readable file):
@@ -43,7 +44,7 @@
     <exec_method
       type="method"
       name="start"
-      exec="/opt/local/bin/pluto"
+      exec="/opt/local/lib/svc/method/pluto"
       timeout_seconds="60">
       <method_context>
         <method_environment>
