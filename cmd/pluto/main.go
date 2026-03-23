@@ -86,15 +86,27 @@ func main() {
 	slog.Info("stopped")
 }
 
-// authenticateAll authenticates all sessions concurrently and returns the
-// first error encountered, if any.
+// bootConcurrency limits how many tuner boot requests run simultaneously
+// to avoid bursting Pluto TV's auth endpoint.
+const bootConcurrency = 3
+
+// authenticateAll authenticates all sessions concurrently (up to bootConcurrency
+// at a time) and returns the first error encountered, if any.
 func authenticateAll(ctx context.Context, sessions []*auth.Session) error {
 	errs := make([]error, len(sessions))
+	sem := make(chan struct{}, bootConcurrency)
 	var wg sync.WaitGroup
 	for i, s := range sessions {
 		wg.Add(1)
 		go func(idx int, sess *auth.Session) {
 			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				errs[idx] = ctx.Err()
+				return
+			}
+			defer func() { <-sem }()
 			errs[idx] = sess.Authenticate(ctx)
 		}(i, s)
 	}
