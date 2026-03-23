@@ -39,8 +39,11 @@ func New(c *cache.Cache, cfg *config.Config, version string) *Server {
 	mux.HandleFunc("/xmltv.xml", s.handleEPG)
 
 	// Register tuner endpoints for each configured tuner (1-indexed for users).
+	// Primary format matches upstream: /tuner-N-playlist.m3u
+	// Legacy formats kept for backward compatibility.
 	for n := 1; n <= cfg.TunerCount; n++ {
 		idx := n - 1 // 0-indexed for cache
+		mux.HandleFunc(fmt.Sprintf("/tuner-%d-playlist.m3u", n), s.makeM3UHandler(idx))
 		mux.HandleFunc(fmt.Sprintf("/tuner%d/channels.m3u", n), s.makeM3UHandler(idx))
 		mux.HandleFunc(fmt.Sprintf("/tuner%d/m3u", n), s.makeM3UHandler(idx))
 	}
@@ -113,7 +116,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		if host == "" {
 			host = "localhost:" + strconv.Itoa(s.cfg.Port)
 		}
-		tuners[i-1] = fmt.Sprintf("http://%s/tuner%d/channels.m3u", host, i)
+		tuners[i-1] = fmt.Sprintf("http://%s/tuner-%d-playlist.m3u", host, i)
 	}
 
 	epgURL := ""
@@ -161,7 +164,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 	tuners := make([]tunerEntry, s.cfg.TunerCount)
 	for i := 1; i <= s.cfg.TunerCount; i++ {
-		tuners[i-1] = tunerEntry{N: i, Path: fmt.Sprintf("/tuner%d/channels.m3u", i)}
+		tuners[i-1] = tunerEntry{N: i, Path: fmt.Sprintf("/tuner-%d-playlist.m3u", i)}
 	}
 
 	data := struct {
