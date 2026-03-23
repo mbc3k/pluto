@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,8 +31,8 @@ const (
 
 	// tokenRefreshMargin: re-auth sessions expiring within this window.
 	tokenRefreshMargin = 4 * time.Hour
-	// tokenTTL: assumed JWT lifetime from Pluto TV.
-	tokenTTL = 24 * time.Hour
+	// tokenTTLFallback: assumed JWT lifetime when the token's exp claim cannot be parsed.
+	tokenTTLFallback = 24 * time.Hour
 )
 
 // Session represents a single authenticated Pluto TV tuner session.
@@ -111,7 +112,12 @@ func (s *Session) authenticate(ctx context.Context) error {
 
 	s.token = auth.SessionToken
 	s.stitcherParams = auth.StitcherParams
-	s.tokenExpiry = time.Now().Add(tokenTTL)
+	if exp, ok := parseJWTExpiry(s.token); ok {
+		s.tokenExpiry = exp
+	} else {
+		slog.Warn("could not parse JWT exp, using fallback TTL", "index", s.index)
+		s.tokenExpiry = time.Now().Add(tokenTTLFallback)
+	}
 	slog.Info("tuner authenticated", "index", s.index)
 	return nil
 }
@@ -143,6 +149,32 @@ func (s *Session) StitcherParams() string {
 // DeviceID returns the stable device identifier for this session.
 func (s *Session) DeviceID() string {
 	return s.deviceID // immutable after construction
+}
+
+// parseJWTExpiry decodes the exp claim from a JWT token string.
+// Returns the expiry time and true on success, or zero/false if the token
+// cannot be parsed or contains an implausible timestamp.
+func parseJWTExpiry(token string) (time.Time, bool) {
+	parts := strings.SplitN(token, ".", 3)
+	if len(parts) != 3 {
+		return time.Time{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}, false
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp == 0 {
+		return time.Time{}, false
+	}
+	exp := time.Unix(claims.Exp, 0)
+	now := time.Now()
+	if exp.Before(now) || exp.After(now.Add(7*24*time.Hour)) {
+		return time.Time{}, false
+	}
+	return exp, true
 }
 
 // loadOrCreateDeviceIDs reads device IDs from path, generating and persisting
