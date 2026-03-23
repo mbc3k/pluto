@@ -19,6 +19,9 @@ import (
 //go:embed index.html
 var indexHTML string
 
+//go:embed style.css
+var styleCSS string
+
 // Server is the HTTP server for serving playlists and EPG data.
 type Server struct {
 	srv     *http.Server
@@ -33,6 +36,7 @@ func New(c *cache.Cache, cfg *config.Config, version string) *Server {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
+	mux.HandleFunc("/style.css", s.handleCSS)
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/status", s.handleStatus)
 	mux.HandleFunc("/epg.xml", s.handleEPG)
@@ -154,6 +158,12 @@ var indexTmpl = template.Must(template.New("index").Parse(indexHTML))
 type tunerEntry struct {
 	N    int
 	Path string
+}
+
+func (s *Server) handleCSS(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	fmt.Fprint(w, styleCSS)
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
