@@ -20,7 +20,11 @@ var slugPrefixMap = map[string]bool{
 	"cnn": true, "dabl": true, "heartland": true, "newsy": true, "buzzr": true,
 }
 
-const channelsAPI = "https://api.pluto.tv/v2/channels"
+const (
+	channelsAPI = "https://api.pluto.tv/v2/channels"
+	// windowDelay is the pause between consecutive 6-hour EPG window fetches.
+	windowDelay = 500 * time.Millisecond
+)
 
 // FetchChannels retrieves the full channel list with timeline data from
 // the Pluto TV API. It fetches 4 consecutive 6-hour windows to build a
@@ -34,6 +38,13 @@ func FetchChannels(ctx context.Context, client *RetryClient) ([]Channel, error) 
 	var channelOrder []string
 
 	for i := 0; i < 4; i++ {
+		if i > 0 {
+			select {
+			case <-time.After(windowDelay):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
 		start := now.Add(time.Duration(i) * 6 * time.Hour)
 		stop := start.Add(6 * time.Hour)
 
