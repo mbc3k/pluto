@@ -59,6 +59,7 @@ container run --rm \
   pluto
 ```
 
+Replace `--rm` with `--detach` to deploy long-term.
 The `-v pluto-data:/data` volume persists the device ID file across restarts. Without it, Pluto TV sees a new device on every run and may rate-limit you.
 
 **Verify:**
