@@ -1,8 +1,8 @@
-# pluto
+# Pluto for Channels (for SmartOS)
 
 A bridge between [Pluto TV](https://pluto.tv) and [Channels DVR](https://getchannels.com). Serves authenticated M3U playlists and an XMLTV EPG over HTTP so Channels DVR can treat Pluto TV as a source of custom channels.
 
-Inspired by [maddox/pluto-for-channels](https://github.com/maddox/pluto-for-channels). Rewritten in Go. No Node, no Docker, no runtime dependencies — a single statically-compiled binary.
+Inspired by [maddox/pluto-for-channels](https://github.com/maddox/pluto-for-channels), rewritten as a Go binary and built to run with as few dependencies as possible.
 
 ## How it works
 
@@ -11,6 +11,7 @@ Inspired by [maddox/pluto-for-channels](https://github.com/maddox/pluto-for-chan
 - Serves per-tuner M3U playlists at `/tunerN/channels.m3u` and a shared XMLTV EPG at `/epg.xml`
 - Never goes dark: a failed refresh keeps the previous cache until the next successful one
 - On startup, if the initial fetch fails it retries at 1 min → 5 min → 30 min before settling into the 3-hour cycle
+- Intended to be a drop-in replacement for Jon Maddox's pluto-for-channels Docker container. Same URL format.
 
 ## Configuration
 
