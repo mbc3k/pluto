@@ -47,6 +47,23 @@ smf-install: $(SMF_SRC)
 ## deploy: install binary + SMF manifest (run as root on SmartOS)
 deploy: install smf-install
 
+## install-systemd: install binary + systemd unit (run as root on Linux)
+install-systemd: build-linux
+	install -m 0755 $(BINARY)-linux-amd64 /usr/local/bin/$(BINARY)
+	install -d /var/lib/pluto
+	install -m 0644 systemd/pluto.service /etc/systemd/system/pluto.service
+	systemctl daemon-reload
+	@echo "Edit /etc/pluto.conf with PLUTO_EMAIL and PLUTO_PASSWORD, then:"
+	@echo "  systemctl enable --now pluto"
+
+## install-launchd: install binary + launchd plist (macOS)
+install-launchd: build-local
+	install -m 0755 $(BINARY) /usr/local/bin/$(BINARY)
+	install -d /usr/local/var/pluto /usr/local/var/log
+	cp launchd/com.mbc3k.pluto.plist ~/Library/LaunchAgents/
+	@echo "Set PLUTO_EMAIL/PLUTO_PASSWORD in the plist or /usr/local/etc/pluto.conf, then:"
+	@echo "  launchctl load ~/Library/LaunchAgents/com.mbc3k.pluto.plist"
+
 ## clean: remove build artifacts
 clean:
 	rm -f $(BINARY)
