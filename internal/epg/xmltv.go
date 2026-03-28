@@ -26,14 +26,15 @@ type xChannel struct {
 }
 
 type programme struct {
-	Start   string     `xml:"start,attr"`
-	Stop    string     `xml:"stop,attr"`
-	Channel string     `xml:"channel,attr"`
-	Title   []langText `xml:"title"`
-	Desc    []langText `xml:"desc,omitempty"`
+	Start    string     `xml:"start,attr"`
+	Stop     string     `xml:"stop,attr"`
+	Channel  string     `xml:"channel,attr"`
+	Title    []langText `xml:"title"`
+	Desc     []langText `xml:"desc,omitempty"`
 	SubTitle []langText `xml:"sub-title,omitempty"`
-	EpNum   *epNum     `xml:"episode-num,omitempty"`
-	Rating  *rating    `xml:"rating,omitempty"`
+	Category []langText `xml:"category,omitempty"`
+	EpNum    *epNum     `xml:"episode-num,omitempty"`
+	Rating   *rating    `xml:"rating,omitempty"`
 }
 
 type langText struct {
@@ -65,7 +66,7 @@ func Generate(channels []pluto.Channel) ([]byte, error) {
 	for _, ch := range channels {
 		doc.Channels = append(doc.Channels, buildChannel(ch))
 		for _, prog := range ch.Timelines {
-			doc.Programmes = append(doc.Programmes, buildProgramme(ch.Slug, prog))
+			doc.Programmes = append(doc.Programmes, buildProgramme(ch.Slug, ch.Category, prog))
 		}
 	}
 
@@ -94,7 +95,33 @@ func buildChannel(ch pluto.Channel) xChannel {
 	return xch
 }
 
-func buildProgramme(channelSlug string, p pluto.Program) programme {
+// isFilm returns true if the program's series type indicates a movie/film.
+func isFilm(p pluto.Program) bool {
+	return p.Episode.Series.Type == "film"
+}
+
+// programmeCategory returns the XMLTV category for a program.
+// Films get "Movie" so DVR software files them correctly.
+// Other programs get the channel's Pluto category (e.g. "Kids", "News")
+// plus the episode genre when available.
+func programmeCategory(channelCategory string, p pluto.Program) []langText {
+	var cats []langText
+	if isFilm(p) {
+		cats = append(cats, langText{Lang: "en", Value: "Movie"})
+	}
+	if p.Episode.Genre != "" {
+		cats = append(cats, langText{Lang: "en", Value: p.Episode.Genre})
+	}
+	if p.Episode.SubGenre != "" && p.Episode.SubGenre != p.Episode.Genre {
+		cats = append(cats, langText{Lang: "en", Value: p.Episode.SubGenre})
+	}
+	if channelCategory != "" && channelCategory != p.Episode.Genre {
+		cats = append(cats, langText{Lang: "en", Value: channelCategory})
+	}
+	return cats
+}
+
+func buildProgramme(channelSlug, channelCategory string, p pluto.Program) programme {
 	prog := programme{
 		Start:   formatXMLTVTime(p.Start),
 		Stop:    formatXMLTVTime(p.Stop),
@@ -117,8 +144,13 @@ func buildProgramme(channelSlug string, p pluto.Program) programme {
 		}
 	}
 
+	// Category tags for DVR classification (Movie, genre, etc.).
+	prog.Category = programmeCategory(channelCategory, p)
+
 	// Episode numbering in xmltv "onscreen" format: S01E02.
-	if p.Episode.Season > 0 && p.Episode.Number > 0 {
+	// Skip for films — Pluto sets season/number to 1/1 for movies,
+	// which confuses DVR software into treating them as series.
+	if !isFilm(p) && p.Episode.Season > 0 && p.Episode.Number > 0 {
 		prog.EpNum = &epNum{
 			System: "onscreen",
 			Value:  fmt.Sprintf("S%02dE%02d", p.Episode.Season, p.Episode.Number),
