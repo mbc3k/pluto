@@ -1,0 +1,33 @@
+[Unit]
+Description=Pluto TV Bridge for Channels DVR
+Documentation=https://github.com/mbc3k/pluto
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/pluto
+Restart=on-failure
+RestartSec=5s
+
+# Credentials — override in /etc/systemd/system/pluto.service.d/override.conf
+# or use systemctl edit pluto to set:
+#   [Service]
+#   Environment=PLUTO_EMAIL=you@example.com
+#   Environment=PLUTO_PASSWORD=secret
+EnvironmentFile=-/etc/pluto.conf
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/pluto
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+
+# Device ID persistence
+Environment=DEVICE_ID_FILE=/var/lib/pluto/devices.conf
+
+[Install]
+WantedBy=multi-user.target

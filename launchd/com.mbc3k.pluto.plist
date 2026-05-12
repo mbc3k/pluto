@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mbc3k.pluto</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/pluto</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>DEVICE_ID_FILE</key>
+        <string>/usr/local/var/pluto/devices.conf</string>
+        <!-- Set credentials here or in /usr/local/etc/pluto.conf -->
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/usr/local/var/log/pluto.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/usr/local/var/log/pluto.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>/usr/local/var/pluto</string>
+</dict>
+</plist>
