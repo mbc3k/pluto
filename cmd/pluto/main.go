@@ -47,7 +47,7 @@ func main() {
 	}
 
 	c := cache.New(cfg.TunerCount)
-	srv := server.New(c, cfg, version)
+	srv := server.New(c, sessions, cfg, version)
 
 	// Root context cancelled on SIGTERM/SIGINT.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)

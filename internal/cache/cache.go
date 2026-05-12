@@ -3,16 +3,20 @@ package cache
 import (
 	"sync"
 	"time"
+
+	"github.com/mbc3k/pluto/internal/pluto"
 )
 
-// Cache is a thread-safe in-memory store for generated M3U playlists and
-// the XMLTV EPG document. Reads are served from the last successful refresh;
-// a failed refresh never clears the existing data (serve stale, never dark).
+// Cache is a thread-safe in-memory store for generated M3U playlists,
+// the XMLTV EPG document, and the channel list. Reads are served from the
+// last successful refresh; a failed refresh never clears the existing data
+// (serve stale, never dark).
 type Cache struct {
-	mu      sync.RWMutex
-	m3u     []string // indexed 0..TunerCount-1
-	xmltv   []byte
-	updated time.Time
+	mu        sync.RWMutex
+	m3u       []string // indexed 0..TunerCount-1, may be empty if dynamic
+	channels  []pluto.Channel
+	xmltv     []byte
+	updated   time.Time
 }
 
 // New creates an empty Cache pre-allocated for the given tuner count.
@@ -24,10 +28,11 @@ func New(tunerCount int) *Cache {
 
 // SetAll atomically replaces all cached content. m3u must have the same
 // length as the tunerCount passed to New.
-func (c *Cache) SetAll(m3u []string, xmltv []byte) {
+func (c *Cache) SetAll(m3u []string, channels []pluto.Channel, xmltv []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.m3u = m3u
+	c.channels = channels
 	c.xmltv = xmltv
 	c.updated = time.Now()
 }
@@ -53,6 +58,17 @@ func (c *Cache) GetXMLTV() ([]byte, bool) {
 		return nil, false
 	}
 	return c.xmltv, true
+}
+
+// GetChannels returns the cached channel list.
+// Returns (nil, false) if the cache has not been populated yet.
+func (c *Cache) GetChannels() ([]pluto.Channel, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.updated.IsZero() {
+		return nil, false
+	}
+	return c.channels, true
 }
 
 // LastUpdated returns the time of the last successful SetAll call,
