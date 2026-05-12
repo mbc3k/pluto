@@ -12,8 +12,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mbc3k/pluto/internal/auth"
 	"github.com/mbc3k/pluto/internal/cache"
 	"github.com/mbc3k/pluto/internal/config"
+	"github.com/mbc3k/pluto/internal/playlist"
 )
 
 //go:embed index.html
@@ -24,15 +26,17 @@ var styleCSS string
 
 // Server is the HTTP server for serving playlists and EPG data.
 type Server struct {
-	srv     *http.Server
-	cache   *cache.Cache
-	cfg     *config.Config
-	version string
+	srv      *http.Server
+	cache    *cache.Cache
+	cfg      *config.Config
+	sessions []*auth.Session
+	version  string
 }
 
-// New creates a Server wired to the given cache and config.
-func New(c *cache.Cache, cfg *config.Config, version string) *Server {
-	s := &Server{cache: c, cfg: cfg, version: version}
+// New creates a Server wired to the given cache, config, and sessions.
+// Sessions are required for dynamic M3U generation on each request.
+func New(c *cache.Cache, sessions []*auth.Session, cfg *config.Config, version string) *Server {
+	s := &Server{cache: c, cfg: cfg, sessions: sessions, version: version}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
@@ -76,13 +80,34 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 // makeM3UHandler returns a handler that serves the M3U for the given cache index.
+// Unlike the static cache approach, this handler regenerates the M3U on each
+// request by calling EnsureFresh() on the corresponding session first. This
+// ensures that the JWT embedded in stream URLs is always valid, even if the
+// scheduler's 3-hour refresh cycle hasn't run yet.
 func (s *Server) makeM3UHandler(idx int) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		data, ok := s.cache.GetM3U(idx)
+		sessions := s.sessions
+		if idx >= len(sessions) {
+			http.Error(w, "tuner index out of range", http.StatusBadRequest)
+			return
+		}
+		sess := sessions[idx]
+
+		// Ensure the session's token is fresh before generating URLs.
+		// This is the key fix: instead of serving a static playlist with
+		// a potentially expired JWT, we re-authenticate on each request.
+		if err := sess.EnsureFresh(r.Context()); err != nil {
+			slog.Warn("session refresh failed for dynamic M3U", "tuner", idx, "err", err)
+			// Fall through to serve stale data rather than failing completely.
+		}
+
+		channels, ok := s.cache.GetChannels()
 		if !ok {
 			http.Error(w, "playlist not yet available", http.StatusServiceUnavailable)
 			return
 		}
+
+		data := playlist.Generate(s.cfg.StartChannel, sess, channels)
 		w.Header().Set("Content-Type", "application/x-mpegurl")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
@@ -114,8 +139,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	updated := s.cache.LastUpdated()
 
-	tuners := make([]string, s.cfg.TunerCount)
-	for i := 1; i <= s.cfg.TunerCount; i++ {
+	tuners := make([]string, len(s.sessions))
+	for i := 1; i <= len(s.sessions); i++ {
 		host := r.Host
 		if host == "" {
 			host = "localhost:" + strconv.Itoa(s.cfg.Port)
@@ -131,13 +156,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	status := map[string]any{
-		"version":      s.version,
-		"ready":        s.cache.IsReady(),
-		"last_updated": formatTime(updated),
-		"tuner_count":  s.cfg.TunerCount,
+		"version":       s.version,
+		"ready":         s.cache.IsReady(),
+		"last_updated":  formatTime(updated),
+		"tuner_count":   len(s.sessions),
 		"start_channel": s.cfg.StartChannel,
-		"tuners":       tuners,
-		"epg_url":      epgURL,
+		"tuners":        tuners,
+		"epg_url":       epgURL,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -172,8 +197,8 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tuners := make([]tunerEntry, s.cfg.TunerCount)
-	for i := 1; i <= s.cfg.TunerCount; i++ {
+	tuners := make([]tunerEntry, len(s.sessions))
+	for i := 1; i <= len(s.sessions); i++ {
 		tuners[i-1] = tunerEntry{N: i, Path: fmt.Sprintf("/tuner-%d-playlist.m3u", i)}
 	}
 
@@ -185,7 +210,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}{
 		Version:     s.version,
 		LastUpdated: formatTime(s.cache.LastUpdated()),
-		TunerCount:  s.cfg.TunerCount,
+		TunerCount:  len(s.sessions),
 		Tuners:      tuners,
 	}
 

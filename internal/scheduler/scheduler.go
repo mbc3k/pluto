@@ -104,7 +104,7 @@ func refreshAll(ctx context.Context, sessions []*auth.Session, c *cache.Cache, c
 		return err
 	}
 
-	c.SetAll(m3u, xmltvData)
+	c.SetAll(m3u, channels, xmltvData)
 	slog.Info("refresh complete", "channels", len(channels), "duration", time.Since(start).Round(time.Millisecond))
 	return nil
 }
