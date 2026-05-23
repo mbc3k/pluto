@@ -30,9 +30,12 @@ const (
 	clientModelNumber = "1.0.0"
 
 	// tokenRefreshMargin: re-auth sessions expiring within this window.
-	tokenRefreshMargin = 4 * time.Hour
+	tokenRefreshMargin = 1 * time.Hour
 	// tokenTTLFallback: assumed JWT lifetime when the token's exp claim cannot be parsed.
 	tokenTTLFallback = 24 * time.Hour
+	// maxTokenAge: maximum time a JWT may be handed out in stream URLs before forcing re-auth,
+	// regardless of the exp claim. This guards against async M3U consumption by Channels DVR.
+	maxTokenAge = 2 * time.Hour
 )
 
 // Session represents a single authenticated Pluto TV tuner session.
@@ -43,6 +46,7 @@ type Session struct {
 	token       string
 	stitcherParams string
 	tokenExpiry time.Time
+	lastIssued  time.Time
 	cfg         *config.Config
 	client      *pluto.RetryClient
 }
@@ -118,24 +122,26 @@ func (s *Session) authenticate(ctx context.Context) error {
 		slog.Warn("could not parse JWT exp, using fallback TTL", "index", s.index)
 		s.tokenExpiry = time.Now().Add(tokenTTLFallback)
 	}
+	s.lastIssued = time.Now()
 	slog.Info("tuner authenticated", "index", s.index)
 	return nil
 }
 
-// EnsureFresh re-authenticates the session if its token is expiring soon.
+// EnsureFresh re-authenticates the session if its token is expiring soon or has been issued too long ago.
 func (s *Session) EnsureFresh(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if time.Now().Add(tokenRefreshMargin).After(s.tokenExpiry) {
+	if time.Now().Add(tokenRefreshMargin).After(s.tokenExpiry) || time.Since(s.lastIssued) > maxTokenAge {
 		return s.authenticate(ctx)
 	}
 	return nil
 }
 
-// Token returns the current JWT for use in stream URLs.
+// Token returns the current JWT for use in stream URLs and records the issuance time.
 func (s *Session) Token() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.lastIssued = time.Now()
 	return s.token
 }
 
