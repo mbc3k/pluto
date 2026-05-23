@@ -160,24 +160,29 @@ func (s *Session) DeviceID() string {
 // parseJWTExpiry decodes the exp claim from a JWT token string.
 // Returns the expiry time and true on success, or zero/false if the token
 // cannot be parsed or contains an implausible timestamp.
+// Extra logging is emitted on failure paths to aid debugging of 401s.
 func parseJWTExpiry(token string) (time.Time, bool) {
 	parts := strings.SplitN(token, ".", 3)
 	if len(parts) != 3 {
+		slog.Debug("JWT parse failed: not 3 parts")
 		return time.Time{}, false
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
+		slog.Debug("JWT parse failed: base64 decode error", "err", err)
 		return time.Time{}, false
 	}
 	var claims struct {
 		Exp int64 `json:"exp"`
 	}
 	if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp == 0 {
+		slog.Debug("JWT parse failed: no exp claim or unmarshal error", "err", err)
 		return time.Time{}, false
 	}
 	exp := time.Unix(claims.Exp, 0)
 	now := time.Now()
 	if exp.Before(now) || exp.After(now.Add(7*24*time.Hour)) {
+		slog.Debug("JWT parse rejected: implausible exp", "exp", exp, "now", now)
 		return time.Time{}, false
 	}
 	return exp, true

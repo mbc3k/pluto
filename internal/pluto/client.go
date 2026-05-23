@@ -45,6 +45,12 @@ func NewRetryClient() *RetryClient {
 // Do executes a request with retry logic. The bodyFn is called before each
 // attempt to produce a fresh request body (necessary because the body is
 // consumed on the first attempt). Pass nil for bodyFn on GET requests.
+//
+// IMPORTANT: 401 responses are returned immediately (no retry). When the
+// caller receives a 401 from a stitcher URL it should treat it as a signal
+// that the JWT embedded in the M3U has expired. The auth/session layer
+// (EnsureFresh + maxTokenAge) and the per-request refresh in server.go are
+// the intended mitigation.
 func (c *RetryClient) Do(ctx context.Context, method, url string, bodyFn func() io.Reader, headers map[string]string) (*http.Response, error) {
 	var lastErr error
 
@@ -79,6 +85,10 @@ func (c *RetryClient) Do(ctx context.Context, method, url string, bodyFn func() 
 		}
 
 		// Retry on rate limiting or server errors.
+		// 401 Unauthorized is NOT retried here. Stitcher 401s usually mean the
+		// embedded JWT in the M3U URL has expired (see maxTokenAge in auth/session.go).
+		// The HTTP server calls EnsureFresh on every M3U request; the scheduler
+		// also refreshes on its cycle.
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
 			resp.Body.Close()
 			lastErr = fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)
