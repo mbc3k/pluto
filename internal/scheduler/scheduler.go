@@ -11,7 +11,6 @@ import (
 	"github.com/mbc3k/pluto/internal/cache"
 	"github.com/mbc3k/pluto/internal/config"
 	"github.com/mbc3k/pluto/internal/epg"
-	"github.com/mbc3k/pluto/internal/playlist"
 	"github.com/mbc3k/pluto/internal/pluto"
 )
 
@@ -28,9 +27,9 @@ var initialRetryDelays = []time.Duration{
 // cfg.RefreshEvery interval. Run blocks until ctx is cancelled.
 func Run(ctx context.Context, sessions []*auth.Session, c *cache.Cache, cfg *config.Config, client *pluto.RetryClient) {
 	// Initial population with retry schedule.
-	if err := refreshAll(ctx, sessions, c, cfg, client); err != nil {
+	if err := refreshAll(ctx, sessions, c, client); err != nil {
 		slog.Error("initial refresh failed", "err", err)
-		if !retryInitial(ctx, sessions, c, cfg, client) {
+		if !retryInitial(ctx, sessions, c, client) {
 			return // context cancelled
 		}
 	}
@@ -43,7 +42,7 @@ func Run(ctx context.Context, sessions []*auth.Session, c *cache.Cache, cfg *con
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := refreshAll(ctx, sessions, c, cfg, client); err != nil {
+			if err := refreshAll(ctx, sessions, c, client); err != nil {
 				slog.Error("scheduled refresh failed, keeping stale data", "err", err)
 			}
 		}
@@ -52,7 +51,7 @@ func Run(ctx context.Context, sessions []*auth.Session, c *cache.Cache, cfg *con
 
 // retryInitial attempts the initial cache population using the escalating
 // retry schedule. Returns false if the context was cancelled.
-func retryInitial(ctx context.Context, sessions []*auth.Session, c *cache.Cache, cfg *config.Config, client *pluto.RetryClient) bool {
+func retryInitial(ctx context.Context, sessions []*auth.Session, c *cache.Cache, client *pluto.RetryClient) bool {
 	for _, delay := range initialRetryDelays {
 		slog.Info("scheduling initial refresh retry", "in", delay)
 		select {
@@ -60,7 +59,7 @@ func retryInitial(ctx context.Context, sessions []*auth.Session, c *cache.Cache,
 			return false
 		case <-time.After(delay):
 		}
-		if err := refreshAll(ctx, sessions, c, cfg, client); err != nil {
+		if err := refreshAll(ctx, sessions, c, client); err != nil {
 			slog.Error("retry refresh failed", "err", err)
 		} else {
 			return true
@@ -70,9 +69,11 @@ func retryInitial(ctx context.Context, sessions []*auth.Session, c *cache.Cache,
 }
 
 // refreshAll re-authenticates stale sessions, fetches channels, and
-// regenerates all M3U playlists and the XMLTV EPG in one atomic update.
+// regenerates the XMLTV EPG in one atomic update. Per-tuner M3U playlists
+// are built lazily on request (and cached until the token or channel data
+// changes) so the refresh path does not pay N×playlist cost up front.
 // On failure the existing cache is left intact.
-func refreshAll(ctx context.Context, sessions []*auth.Session, c *cache.Cache, cfg *config.Config, client *pluto.RetryClient) error {
+func refreshAll(ctx context.Context, sessions []*auth.Session, c *cache.Cache, client *pluto.RetryClient) error {
 	start := time.Now()
 
 	// Refresh sessions that are close to expiry, concurrently.
@@ -87,24 +88,14 @@ func refreshAll(ctx context.Context, sessions []*auth.Session, c *cache.Cache, c
 	}
 	slog.Debug("fetched channels", "count", len(channels))
 
-	// Generate all M3U playlists concurrently (pure functions).
-	m3u := make([]string, len(sessions))
-	var wg sync.WaitGroup
-	for i, sess := range sessions {
-		wg.Add(1)
-		go func(idx int, s *auth.Session) {
-			defer wg.Done()
-			m3u[idx] = playlist.Generate(cfg.StartChannel, s, channels)
-		}(i, sess)
-	}
-	wg.Wait()
-
 	xmltvData, err := epg.Generate(channels)
 	if err != nil {
 		return err
 	}
 
-	c.SetAll(m3u, channels, xmltvData)
+	// SetAll also invalidates any lazily-cached M3Us so the next request
+	// rebuilds against the new channel list.
+	c.SetAll(channels, xmltvData)
 	slog.Info("refresh complete", "channels", len(channels), "duration", time.Since(start).Round(time.Millisecond))
 	return nil
 }

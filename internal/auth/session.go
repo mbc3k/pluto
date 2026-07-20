@@ -40,15 +40,18 @@ const (
 
 // Session represents a single authenticated Pluto TV tuner session.
 type Session struct {
-	mu          sync.Mutex
-	index       int
-	deviceID    string
-	token       string
+	mu             sync.Mutex
+	index          int
+	deviceID       string
+	token          string
 	stitcherParams string
-	tokenExpiry time.Time
-	lastIssued  time.Time
-	cfg         *config.Config
-	client      *pluto.RetryClient
+	tokenExpiry    time.Time
+	lastIssued     time.Time
+	// tokenGen increments on every successful authenticate so callers can
+	// cheaply detect when a previously generated M3U must be rebuilt.
+	tokenGen int64
+	cfg      *config.Config
+	client   *pluto.RetryClient
 }
 
 // NewSessions loads or creates device IDs and returns one Session per tuner.
@@ -123,7 +126,8 @@ func (s *Session) authenticate(ctx context.Context) error {
 		s.tokenExpiry = time.Now().Add(tokenTTLFallback)
 	}
 	s.lastIssued = time.Now()
-	slog.Info("tuner authenticated", "index", s.index)
+	s.tokenGen++
+	slog.Info("tuner authenticated", "index", s.index, "tokenGen", s.tokenGen)
 	return nil
 }
 
@@ -137,12 +141,21 @@ func (s *Session) EnsureFresh(ctx context.Context) error {
 	return nil
 }
 
-// Token returns the current JWT for use in stream URLs and records the issuance time.
-func (s *Session) Token() string {
+// Credentials returns the JWT and stitcherParams under a single lock and
+// records that the token was handed out. gen is a monotonic counter that
+// changes only on re-authentication; callers use it to reuse a previously
+// built M3U when the embedded credentials have not changed.
+func (s *Session) Credentials() (token, stitcherParams string, gen int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastIssued = time.Now()
-	return s.token
+	return s.token, s.stitcherParams, s.tokenGen
+}
+
+// Token returns the current JWT for use in stream URLs and records the issuance time.
+func (s *Session) Token() string {
+	token, _, _ := s.Credentials()
+	return token
 }
 
 // StitcherParams returns the stitcherParams string from the boot response.

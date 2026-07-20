@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand"
+	"net"
 	"net/http"
 	"time"
 )
@@ -15,9 +16,11 @@ const (
 	retryBaseDelay   = 2 * time.Second
 	retryMaxDelay    = 60 * time.Second
 
-	httpTimeout       = 30 * time.Second
-	httpKeepAlive     = 30 * time.Second
-	httpIdleConns     = 20
+	httpTimeout         = 30 * time.Second
+	httpDialTimeout     = 10 * time.Second
+	httpKeepAlive       = 30 * time.Second
+	httpIdleConns       = 20
+	httpIdleConnsPerHost = 10
 	httpIdleConnTimeout = 90 * time.Second
 )
 
@@ -30,9 +33,17 @@ type RetryClient struct {
 // NewRetryClient creates a RetryClient with sensible timeout defaults.
 func NewRetryClient() *RetryClient {
 	transport := &http.Transport{
-		MaxIdleConns:        httpIdleConns,
-		IdleConnTimeout:     httpIdleConnTimeout,
-		DisableCompression:  false,
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   httpDialTimeout,
+			KeepAlive: httpKeepAlive,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          httpIdleConns,
+		MaxIdleConnsPerHost:   httpIdleConnsPerHost,
+		IdleConnTimeout:       httpIdleConnTimeout,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
 	}
 	return &RetryClient{
 		http: &http.Client{

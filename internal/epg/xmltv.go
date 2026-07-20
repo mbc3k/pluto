@@ -59,14 +59,22 @@ type rating struct {
 // Generate builds a complete XMLTV document from the given channel list.
 // The result is a single EPG shared across all tuners.
 func Generate(channels []pluto.Channel) ([]byte, error) {
-	doc := tv{
-		GeneratorInfoName: "pluto",
+	nProg := 0
+	for i := range channels {
+		nProg += len(channels[i].Timelines)
 	}
 
-	for _, ch := range channels {
+	doc := tv{
+		GeneratorInfoName: "pluto",
+		Channels:          make([]xChannel, 0, len(channels)),
+		Programmes:        make([]programme, 0, nProg),
+	}
+
+	for i := range channels {
+		ch := &channels[i]
 		doc.Channels = append(doc.Channels, buildChannel(ch))
-		for _, prog := range ch.Timelines {
-			doc.Programmes = append(doc.Programmes, buildProgramme(ch.Slug, ch.Category, prog))
+		for j := range ch.Timelines {
+			doc.Programmes = append(doc.Programmes, buildProgramme(ch.Slug, ch.Category, &ch.Timelines[j]))
 		}
 	}
 
@@ -76,13 +84,13 @@ func Generate(channels []pluto.Channel) ([]byte, error) {
 	}
 
 	result := make([]byte, 0, len(xml.Header)+len(out)+1)
-	result = append(result, []byte(xml.Header)...)
+	result = append(result, xml.Header...)
 	result = append(result, out...)
 	result = append(result, '\n')
 	return result, nil
 }
 
-func buildChannel(ch pluto.Channel) xChannel {
+func buildChannel(ch *pluto.Channel) xChannel {
 	xch := xChannel{
 		ID: ch.Slug,
 		DisplayName: []langText{
@@ -96,7 +104,7 @@ func buildChannel(ch pluto.Channel) xChannel {
 }
 
 // isFilm returns true if the program's series type indicates a movie/film.
-func isFilm(p pluto.Program) bool {
+func isFilm(p *pluto.Program) bool {
 	return p.Episode.Series.Type == "film"
 }
 
@@ -104,7 +112,7 @@ func isFilm(p pluto.Program) bool {
 // Films get "Movie" so DVR software files them correctly.
 // Other programs get the channel's Pluto category (e.g. "Kids", "News")
 // plus the episode genre when available.
-func programmeCategory(channelCategory string, p pluto.Program) []langText {
+func programmeCategory(channelCategory string, p *pluto.Program) []langText {
 	var cats []langText
 	if isFilm(p) {
 		cats = append(cats, langText{Lang: "en", Value: "Movie"})
@@ -121,7 +129,7 @@ func programmeCategory(channelCategory string, p pluto.Program) []langText {
 	return cats
 }
 
-func buildProgramme(channelSlug, channelCategory string, p pluto.Program) programme {
+func buildProgramme(channelSlug, channelCategory string, p *pluto.Program) programme {
 	prog := programme{
 		Start:   formatXMLTVTime(p.Start),
 		Stop:    formatXMLTVTime(p.Stop),

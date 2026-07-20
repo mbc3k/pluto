@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -80,10 +81,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 // makeM3UHandler returns a handler that serves the M3U for the given cache index.
-// Unlike the static cache approach, this handler regenerates the M3U on each
-// request by calling EnsureFresh() on the corresponding session first. This
-// ensures that the JWT embedded in stream URLs is always valid, even if the
-// scheduler's 3-hour refresh cycle hasn't run yet.
+// EnsureFresh runs on every request so the JWT embedded in stream URLs stays
+// valid even if the scheduler's refresh cycle hasn't fired yet. The playlist
+// string itself is rebuilt only when the token generation or channel data
+// changes; otherwise the previous result is served from cache.
 func (s *Server) makeM3UHandler(idx int) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sessions := s.sessions
@@ -94,11 +95,18 @@ func (s *Server) makeM3UHandler(idx int) http.HandlerFunc {
 		sess := sessions[idx]
 
 		// Ensure the session's token is fresh before generating URLs.
-		// This is the key fix: instead of serving a static playlist with
-		// a potentially expired JWT, we re-authenticate on each request.
 		if err := sess.EnsureFresh(r.Context()); err != nil {
 			slog.Warn("session refresh failed for dynamic M3U", "tuner", idx, "err", err)
 			// Fall through to serve stale data rather than failing completely.
+		}
+
+		// Single lock acquisition for token + stitcherParams + generation counter.
+		// Also records lastIssued so maxTokenAge tracks actual hand-out time.
+		token, stitcherParams, gen := sess.Credentials()
+
+		if data, ok := s.cache.GetM3U(idx, gen); ok {
+			writeM3U(w, data)
+			return
 		}
 
 		channels, ok := s.cache.GetChannels()
@@ -107,12 +115,18 @@ func (s *Server) makeM3UHandler(idx int) http.HandlerFunc {
 			return
 		}
 
-		data := playlist.Generate(s.cfg.StartChannel, sess, channels)
-		w.Header().Set("Content-Type", "application/x-mpegurl")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-		fmt.Fprint(w, data)
+		data := playlist.Generate(s.cfg.StartChannel, token, stitcherParams, channels)
+		s.cache.SetM3U(idx, gen, data)
+		writeM3U(w, data)
 	}
+}
+
+func writeM3U(w http.ResponseWriter, data string) {
+	w.Header().Set("Content-Type", "application/x-mpegurl")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	// WriteString avoids an extra []byte copy of a potentially large playlist.
+	io.WriteString(w, data)
 }
 
 func (s *Server) handleEPG(w http.ResponseWriter, r *http.Request) {
