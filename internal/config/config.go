@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -15,6 +17,11 @@ const (
 	defaultPort         = 8080
 	defaultTunerCount   = 12
 	defaultRefresh      = 3 * time.Hour
+	defaultGuideHours   = 24
+	minGuideHours       = 6
+	maxGuideHours       = 72
+	minRefresh          = time.Minute
+	maxAccessTokenLen   = 128
 	defaultDeviceIDFile = "/opt/local/etc/pluto-devices.conf"
 )
 
@@ -32,9 +39,23 @@ type Config struct {
 	Password     string
 	StartChannel int
 	Port         int
+	BindAddr     string // host or IP only; empty listens on all interfaces
+	AccessToken  string // empty leaves playlist and EPG URLs open
 	TunerCount   int
 	RefreshEvery time.Duration
+	GuideHours   int
 	DeviceIDFile string
+}
+
+// ListenAddr is the address passed to net.Listen. An empty BindAddr keeps
+// the historical ":port" form (all interfaces). IPv6 hosts are bracketed.
+func (c *Config) ListenAddr() string {
+	port := strconv.Itoa(c.Port)
+	host := strings.TrimSpace(c.BindAddr)
+	if host == "" {
+		return ":" + port
+	}
+	return net.JoinHostPort(host, port)
 }
 
 // Load reads configuration from environment variables, falling back to a
@@ -77,7 +98,6 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		Email:        strings.TrimSpace(get("PLUTO_EMAIL")),
 		Password:     get("PLUTO_PASSWORD"),
-		RefreshEvery: defaultRefresh,
 		DeviceIDFile: defaultDeviceIDFile,
 	}
 
@@ -111,8 +131,98 @@ func Load() (*Config, error) {
 	if s := strings.TrimSpace(get("DEVICE_ID_FILE")); s != "" {
 		cfg.DeviceIDFile = s
 	}
+	if cfg.BindAddr, err = normalizeBindAddr(get("BIND_ADDR")); err != nil {
+		return nil, err
+	}
+	if cfg.AccessToken, err = normalizeAccessToken(get("ACCESS_TOKEN")); err != nil {
+		return nil, err
+	}
+	if cfg.RefreshEvery, err = parseRefreshEvery(get("REFRESH_EVERY")); err != nil {
+		return nil, err
+	}
+	if cfg.GuideHours, err = parseGuideHours(get("GUIDE_HOURS")); err != nil {
+		return nil, err
+	}
 
 	return cfg, nil
+}
+
+// normalizeBindAddr accepts a host or IP and rejects anything that already
+// includes a port. Empty means all interfaces. Brackets around an IPv6
+// address are stripped so ListenAddr can bracket it exactly once.
+func normalizeBindAddr(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", nil
+	}
+	if _, _, err := net.SplitHostPort(s); err == nil {
+		return "", fmt.Errorf("BIND_ADDR must be a host or IP without a port, got %q", s)
+	}
+	if strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]") {
+		s = s[1 : len(s)-1]
+	}
+	if s == "" || strings.ContainsAny(s, " \t/?#") {
+		return "", fmt.Errorf("BIND_ADDR is not a host")
+	}
+	return s, nil
+}
+
+// normalizeAccessToken accepts an empty token (gate off) or a short secret
+// that is safe to place in a URL path and query string. The value itself is
+// never included in the error.
+func normalizeAccessToken(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", nil
+	}
+	if len(s) > maxAccessTokenLen {
+		return "", fmt.Errorf("ACCESS_TOKEN must be at most %d characters", maxAccessTokenLen)
+	}
+	for _, r := range s {
+		if r <= ' ' || r == '/' || r == '?' || r == '#' || r == '&' || r == '%' {
+			return "", fmt.Errorf("ACCESS_TOKEN contains a character that cannot appear in a URL path or query")
+		}
+	}
+	return s, nil
+}
+
+func parseRefreshEvery(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return defaultRefresh, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("REFRESH_EVERY: %w", err)
+	}
+	if d < minRefresh {
+		return 0, fmt.Errorf("REFRESH_EVERY must be at least %s, got %s", minRefresh, d)
+	}
+	return d, nil
+}
+
+// parseGuideHours accepts 6–72. Values that are not a multiple of the 6-hour
+// Pluto window are rounded up, and 72 is the cap.
+func parseGuideHours(s string) (int, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return defaultGuideHours, nil
+	}
+	h, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("GUIDE_HOURS: %w", err)
+	}
+	if h < minGuideHours || h > maxGuideHours {
+		return 0, fmt.Errorf("GUIDE_HOURS must be between %d and %d, got %d", minGuideHours, maxGuideHours, h)
+	}
+	rounded := ((h + 5) / 6) * 6
+	if rounded > maxGuideHours {
+		rounded = maxGuideHours
+	}
+	if rounded != h {
+		slog.Info("GUIDE_HOURS rounded up to a multiple of 6", "requested", h, "using", rounded)
+	}
+	return rounded, nil
 }
 
 // configPath returns the configuration file to read. explicit is true when

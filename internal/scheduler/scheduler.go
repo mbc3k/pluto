@@ -12,6 +12,7 @@ import (
 	"github.com/mbc3k/pluto/internal/cache"
 	"github.com/mbc3k/pluto/internal/config"
 	"github.com/mbc3k/pluto/internal/epg"
+	"github.com/mbc3k/pluto/internal/metrics"
 	"github.com/mbc3k/pluto/internal/pluto"
 )
 
@@ -26,11 +27,13 @@ var initialRetryDelays = []time.Duration{
 // Run starts the background refresh loop. It first populates the cache
 // immediately (with retries on failure), then refreshes on the regular
 // cfg.RefreshEvery interval. Run blocks until ctx is cancelled.
-func Run(ctx context.Context, sessions []*auth.Session, c *cache.Cache, cfg *config.Config, client *pluto.RetryClient) {
+func Run(ctx context.Context, sessions []*auth.Session, c *cache.Cache, cfg *config.Config, client *pluto.RetryClient, rec *metrics.Recorder) {
 	// Initial population with retry schedule.
-	if err := refreshAll(ctx, sessions, c, client); err != nil {
+	err := refreshAll(ctx, sessions, c, client, cfg.GuideHours)
+	noteRefresh(ctx, rec, err)
+	if err != nil {
 		slog.Error("initial refresh failed", "err", err)
-		if !retryInitial(ctx, sessions, c, client, cfg.RefreshEvery) {
+		if !retryInitial(ctx, sessions, c, client, cfg.RefreshEvery, cfg.GuideHours, rec) {
 			return // context cancelled
 		}
 	}
@@ -43,16 +46,27 @@ func Run(ctx context.Context, sessions []*auth.Session, c *cache.Cache, cfg *con
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := refreshAll(ctx, sessions, c, client); err != nil {
+			err := refreshAll(ctx, sessions, c, client, cfg.GuideHours)
+			noteRefresh(ctx, rec, err)
+			if err != nil {
 				slog.Error("scheduled refresh failed, keeping stale data", "err", err)
 			}
 		}
 	}
 }
 
+// noteRefresh counts a finished attempt. A cancelled context is shutdown,
+// not a failed refresh, so it is not counted. A nil recorder is ignored.
+func noteRefresh(ctx context.Context, rec *metrics.Recorder, err error) {
+	if rec == nil || ctx.Err() != nil {
+		return
+	}
+	rec.Refresh(err == nil)
+}
+
 // retryInitial attempts the initial cache population using the escalating
 // retry schedule. Returns false if the context was cancelled.
-func retryInitial(ctx context.Context, sessions []*auth.Session, c *cache.Cache, client *pluto.RetryClient, interval time.Duration) bool {
+func retryInitial(ctx context.Context, sessions []*auth.Session, c *cache.Cache, client *pluto.RetryClient, interval time.Duration, guideHours int, rec *metrics.Recorder) bool {
 	for _, delay := range initialRetryDelays {
 		slog.Info("scheduling initial refresh retry", "in", delay)
 		timer := time.NewTimer(delay)
@@ -62,7 +76,9 @@ func retryInitial(ctx context.Context, sessions []*auth.Session, c *cache.Cache,
 			return false
 		case <-timer.C:
 		}
-		if err := refreshAll(ctx, sessions, c, client); err != nil {
+		err := refreshAll(ctx, sessions, c, client, guideHours)
+		noteRefresh(ctx, rec, err)
+		if err != nil {
 			slog.Error("retry refresh failed", "err", err)
 			continue
 		}
@@ -77,7 +93,7 @@ func retryInitial(ctx context.Context, sessions []*auth.Session, c *cache.Cache,
 // are built lazily on request (and cached until the token or channel data
 // changes) so the refresh path does not pay N×playlist cost up front.
 // On failure the existing cache is left intact.
-func refreshAll(ctx context.Context, sessions []*auth.Session, c *cache.Cache, client *pluto.RetryClient) error {
+func refreshAll(ctx context.Context, sessions []*auth.Session, c *cache.Cache, client *pluto.RetryClient, guideHours int) error {
 	start := time.Now()
 
 	// Tuner auth keeps stream URLs working. The guide itself does not need a
@@ -88,7 +104,7 @@ func refreshAll(ctx context.Context, sessions []*auth.Session, c *cache.Cache, c
 	}
 
 	// One channel fetch serves all tuners.
-	channels, err := pluto.FetchChannels(ctx, client)
+	channels, err := pluto.FetchChannels(ctx, client, guideHours)
 	if err != nil {
 		return err
 	}

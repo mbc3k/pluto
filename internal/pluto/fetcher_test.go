@@ -108,7 +108,7 @@ func TestFetchChannelsMergesFourWindows(t *testing.T) {
 	channelsAPI = srv.URL
 	t.Cleanup(func() { channelsAPI = old })
 
-	got, err := FetchChannels(context.Background(), NewRetryClient())
+	got, err := FetchChannels(context.Background(), NewRetryClient(), 24)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,6 +127,64 @@ func TestFetchChannelsMergesFourWindows(t *testing.T) {
 	}
 	if len(got) != 1 || len(got[0].Timelines) != 1 {
 		t.Fatalf("merged: %+v", got)
+	}
+}
+
+func TestWindowsForHours(t *testing.T) {
+	cases := []struct{ hours, want int }{
+		{0, 4}, {-1, 4}, {6, 1}, {24, 4}, {25, 5}, {36, 6}, {72, 12}, {100, 12},
+	}
+	for _, tc := range cases {
+		if got := WindowsForHours(tc.hours); got != tc.want {
+			t.Fatalf("WindowsForHours(%d)=%d, want %d", tc.hours, got, tc.want)
+		}
+	}
+}
+
+func TestFetchChannelsHonorsGuideHoursAndConcurrency(t *testing.T) {
+	var mu sync.Mutex
+	var starts []string
+	inFlight, maxIn := 0, 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		inFlight++
+		if inFlight > maxIn {
+			maxIn = inFlight
+		}
+		starts = append(starts, r.URL.Query().Get("start"))
+		mu.Unlock()
+		time.Sleep(40 * time.Millisecond)
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode([]Channel{{
+			ID: "c1", Name: "One", Slug: "one", Number: 1, IsStitched: true,
+			Timelines: []Program{{
+				ID: "p", Title: "Show", Start: time.Now().UTC(), Stop: time.Now().UTC().Add(time.Hour),
+			}},
+		}})
+	}))
+	defer srv.Close()
+
+	old := channelsAPI
+	channelsAPI = srv.URL
+	t.Cleanup(func() { channelsAPI = old })
+
+	if _, err := FetchChannels(context.Background(), NewRetryClient(), 36); err != nil {
+		t.Fatal(err)
+	}
+	if len(starts) != 6 {
+		t.Fatalf("36h windows: %v", starts)
+	}
+	seen := map[string]bool{}
+	for _, s := range starts {
+		if seen[s] {
+			t.Fatalf("duplicate window start %s in %v", s, starts)
+		}
+		seen[s] = true
+	}
+	if maxIn > windowFetchConcurrency {
+		t.Fatalf("in flight %d, cap %d", maxIn, windowFetchConcurrency)
 	}
 }
 

@@ -46,15 +46,12 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	// Authenticate all sessions concurrently before starting the server.
-	slog.Info("authenticating tuners", "count", cfg.TunerCount)
-	if err := authenticateAll(ctx, sessions); err != nil {
-		slog.Error("initial authentication failed", "err", err)
-		os.Exit(1)
-	}
-
 	c := cache.New(cfg.TunerCount)
 	srv := server.New(c, sessions, cfg, version)
+	// Playlists stay at 503 until this first attempt finishes. HoldAuth runs
+	// before Listen so a request cannot arrive with the flag still open.
+	// /health and the guide answer during sign-in.
+	srv.HoldAuth()
 
 	var wg sync.WaitGroup
 
@@ -68,11 +65,30 @@ func main() {
 		}
 	}()
 
-	// Scheduler goroutine: populates cache immediately then every RefreshEvery.
+	// Sign-in runs beside the listener. A failure does not exit: the next
+	// playlist request retries through EnsureFresh, and the guide does not
+	// need a session.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		scheduler.Run(ctx, sessions, c, cfg, client)
+		defer srv.ReleaseAuth()
+		slog.Info("authenticating tuners", "count", cfg.TunerCount)
+		if err := authenticateAll(ctx, sessions); err != nil {
+			if ctx.Err() == nil {
+				slog.Error("initial authentication failed; playlist requests will retry", "err", err)
+			}
+			return
+		}
+		slog.Info("tuners authenticated", "count", cfg.TunerCount)
+	}()
+
+	// Scheduler goroutine: populates cache immediately then every RefreshEvery.
+	// It starts in parallel with sign-in. The session lock keeps the two from
+	// booting the same tuner twice.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		scheduler.Run(ctx, sessions, c, cfg, client, srv.Metrics())
 	}()
 
 	// Block until signal.
