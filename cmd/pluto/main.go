@@ -91,6 +91,16 @@ func main() {
 		scheduler.Run(ctx, sessions, c, cfg, client, srv.Metrics())
 	}()
 
+	// TV Everywhere guides refresh on the same interval. Disabled unless
+	// TVE_SOURCES is set, and a failed sign-in leaves the lineup in place.
+	if bg := srv.TVE(); bg != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			bg.Run(ctx)
+		}()
+	}
+
 	// Block until signal.
 	<-ctx.Done()
 	slog.Info("shutting down")

@@ -62,6 +62,24 @@
       </a>
     </section>
 
+    {{if .TVE}}
+    <section class="epg-section">
+      <h2 class="section-title">TV Everywhere</h2>
+      <p class="section-subtitle">Each network family is its own custom source. Add the playlist and the guide together in Channels DVR.</p>
+      {{if .TVENotice}}<p class="banner">{{.TVENotice}}</p>{{end}}
+      {{if .TVEPending}}<p class="section-subtitle">{{.TVEPrompt}}</p>{{end}}
+      {{if .TVESignInURL}}<p class="section-subtitle"><a class="tve-link" href="{{.TVESignInURL}}">DirecTV sign-in</a></p>{{end}}
+      {{range .TVE}}
+      <h3 class="section-title">{{.Name}}</h3>
+      <p class="section-subtitle">{{.Channels}} channel{{if ne .Channels 1}}s{{end}}</p>
+      <label class="url-label">Playlist URL</label>
+      <input class="url-field" type="text" readonly spellcheck="false" aria-label="{{.Name}} playlist URL" value="{{.Playlist}}">
+      <label class="url-label">Guide URL</label>
+      <input class="url-field" type="text" readonly spellcheck="false" aria-label="{{.Name}} guide URL" value="{{.Guide}}">
+      {{end}}
+    </section>
+    {{end}}
+
     <!-- Setup Instructions -->
     <section class="setup-section">
       <h3 class="setup-title">

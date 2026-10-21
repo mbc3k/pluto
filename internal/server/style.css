@@ -261,6 +261,16 @@ body {
   height: 24px;
 }
 
+button.epg-button {
+  border: 0;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.tve-link {
+  color: var(--accent-yellow);
+}
+
 /* Setup Instructions */
 .setup-section {
   background: var(--bg-card);
