@@ -23,6 +23,7 @@ import (
 	"github.com/mbc3k/pluto/internal/config"
 	"github.com/mbc3k/pluto/internal/metrics"
 	"github.com/mbc3k/pluto/internal/playlist"
+	"github.com/mbc3k/pluto/internal/tve"
 )
 
 //go:embed index.html
@@ -37,7 +38,18 @@ type Tuner interface {
 	Credentials() (token, stitcherParams string, gen int64)
 }
 
+// tveFeeds is the TV Everywhere surface used by the status page and /tve routes.
+type tveFeeds interface {
+	List() []tve.Link
+	Playlist(id, base string) (string, bool)
+	Guide(id string) ([]byte, time.Time, bool)
+	SignIn() tve.SignInView
+	SubmitCode(ctx context.Context, code string) error
+	StreamStatus(sourceID, channelID string) (string, bool)
+}
+
 // Server is the HTTP server for serving playlists and EPG data.
+
 type Server struct {
 	srv       *http.Server
 	cache     *cache.Cache
@@ -46,6 +58,7 @@ type Server struct {
 	version   string
 	authReady atomic.Bool
 	metrics   *metrics.Recorder
+	tve       tveFeeds
 }
 
 var gzipPool = sync.Pool{
@@ -77,6 +90,12 @@ func newServer(c *cache.Cache, tuners []Tuner, cfg *config.Config, version strin
 	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/epg.xml", s.handleEPG)
 	mux.HandleFunc("/xmltv.xml", s.handleEPG)
+	mux.HandleFunc("/tve/directv", s.handleTVESignIn)
+	mux.HandleFunc("/tve/directv/code", s.handleTVECode)
+	mux.HandleFunc("/tve/", s.handleTVE)
+	if len(cfg.TVESources) > 0 {
+		s.tve = tve.NewService(cfg)
+	}
 
 	// Register tuner endpoints for each configured tuner (1-indexed for users).
 	// Primary format matches upstream: /tuner-N-playlist.m3u
@@ -111,6 +130,13 @@ func (s *Server) ReleaseAuth() { s.authReady.Store(true) }
 // Metrics is the recorder the scheduler updates after each guide refresh.
 func (s *Server) Metrics() *metrics.Recorder { return s.metrics }
 
+// TVE returns the background refresher, or nil when no TV Everywhere source
+// is enabled.
+func (s *Server) TVE() *tve.Service {
+	svc, _ := s.tve.(*tve.Service)
+	return svc
+}
+
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -119,10 +145,11 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// gate checks ACCESS_TOKEN for playlist and EPG URLs. An empty token leaves
-// every route open. Channels DVR cannot send an Authorization header, so the
-// secret is accepted as ?token= or as a /t/<token>/ prefix. Either match is
-// enough. /health, /metrics, /status, and / stay open so an operator can see
+// gate checks ACCESS_TOKEN for Pluto playlists, the EPG, and TV Everywhere
+// routes. An empty token leaves every route open. Channels DVR cannot send
+// an Authorization header, so the secret is accepted as ?token= or as a
+// /t/<token>/ prefix. Either match is enough, and a valid prefix is stripped
+// once. /health, /metrics, /status, and / stay open so an operator can see
 // whether the process is up and copy a URL that already includes the secret.
 func (s *Server) gate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -164,6 +191,9 @@ func tokenMatch(got, want string) bool {
 func isProtectedPath(path string) bool {
 	switch path {
 	case "/epg.xml", "/xmltv.xml":
+		return true
+	}
+	if tve.ProtectedPath(path) {
 		return true
 	}
 	if strings.HasPrefix(path, "/tuner-") && strings.HasSuffix(path, "-playlist.m3u") {
@@ -362,6 +392,133 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// streamBase is the origin prefixed onto local stream paths inside a playlist.
+// When an access token is set, the path form is used so a player that drops
+// query strings still presents the token.
+func (s *Server) streamBase(r *http.Request) string {
+	base := publicBase(r, s.cfg.Port)
+	if s.cfg.AccessToken == "" {
+		return base
+	}
+	return base + "/t/" + s.cfg.AccessToken
+}
+
+func (s *Server) tveURL(base, path string) string {
+	if s.cfg.AccessToken == "" {
+		return base + path
+	}
+	return base + path + "?token=" + url.QueryEscape(s.cfg.AccessToken)
+}
+
+func (s *Server) handleTVE(w http.ResponseWriter, r *http.Request) {
+	if s.tve == nil {
+		http.NotFound(w, r)
+		return
+	}
+	rel := strings.TrimPrefix(r.URL.Path, "/tve/")
+	switch {
+	case strings.HasSuffix(rel, ".m3u") && !strings.Contains(rel, "/"):
+		id := strings.TrimSuffix(rel, ".m3u")
+		body, ok := s.tve.Playlist(id, s.streamBase(r))
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-mpegurl")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		_, _ = io.WriteString(w, body)
+	case strings.HasSuffix(rel, ".xml") && !strings.Contains(rel, "/"):
+		id := strings.TrimSuffix(rel, ".xml")
+		body, updated, ok := s.tve.Guide(id)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		if !updated.IsZero() {
+			w.Header().Set("Last-Modified", updated.UTC().Format(http.TimeFormat))
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		_, _ = w.Write(body)
+	case strings.HasSuffix(rel, "/stream"):
+		parts := strings.Split(rel, "/")
+		if len(parts) != 3 {
+			http.NotFound(w, r)
+			return
+		}
+		msg, ok := s.tve.StreamStatus(parts[0], parts[1])
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		http.Error(w, msg, http.StatusServiceUnavailable)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *Server) handleTVESignIn(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/tve/directv" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.tve == nil {
+		http.NotFound(w, r)
+		return
+	}
+	view := s.tve.SignIn()
+	action := "/tve/directv/code"
+	if s.cfg.AccessToken != "" {
+		action += "?token=" + url.QueryEscape(s.cfg.AccessToken)
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	if err := signInTmpl.Execute(w, signInPage{
+		Notice:  view.Notice,
+		Prompt:  view.Prompt,
+		Signed:  view.Signed,
+		Pending: view.Pending,
+		Action:  action,
+	}); err != nil {
+		slog.Error("render directv sign-in", "err", err)
+	}
+}
+
+func (s *Server) handleTVECode(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/tve/directv/code" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.tve == nil {
+		http.NotFound(w, r)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	if err := s.tve.SubmitCode(r.Context(), r.PostForm.Get("code")); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	loc := "/tve/directv"
+	if s.cfg.AccessToken != "" {
+		loc += "?token=" + url.QueryEscape(s.cfg.AccessToken)
+	}
+	http.Redirect(w, r, loc, http.StatusSeeOther)
+}
+
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	updated := s.cache.LastUpdated()
 	base := publicBase(r, s.cfg.Port)
@@ -387,6 +544,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"tuners":        tuners,
 		"epg_url":       base + s.withToken("/epg.xml"),
 	}
+	if tveStatus := s.tveStatus(base); tveStatus != nil {
+		status["tve"] = tveStatus
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -395,6 +555,43 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if err := enc.Encode(status); err != nil {
 		slog.Debug("write status", "err", err)
 	}
+}
+
+func (s *Server) tveStatus(base string) map[string]any {
+	if s.tve == nil {
+		return nil
+	}
+	view := s.tve.SignIn()
+	var sources []map[string]any
+	out := map[string]any{
+		"provider":  s.cfg.TVEProvider,
+		"signed_in": view.Signed,
+		"pending":   view.Pending,
+		"notice":    view.Notice,
+		"sign_in":   s.tveURL(base, "/tve/directv"),
+	}
+	if view.Pending {
+		out["prompt"] = view.Prompt
+	}
+	for _, link := range s.tve.List() {
+		playlist := s.tveURL(base, "/tve/"+link.ID+".m3u")
+		guide := s.tveURL(base, "/tve/"+link.ID+".xml")
+		if link.ID == "all" {
+			out["combined_playlist"] = playlist
+			out["combined_epg"] = guide
+			continue
+		}
+		sources = append(sources, map[string]any{
+			"id":       link.ID,
+			"name":     link.Name,
+			"channels": link.Channels,
+			"playlist": playlist,
+			"epg":      guide,
+			"updated":  formatTime(link.Updated),
+		})
+	}
+	out["sources"] = sources
+	return out
 }
 
 func formatTime(t time.Time) string {
@@ -465,9 +662,42 @@ func displayVersion(v string) string {
 
 var indexTmpl = template.Must(template.New("index").Parse(indexHTML))
 
+var signInTmpl = template.Must(template.New("directv").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DirecTV sign-in</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="container">
+    <h1 class="logo">DirecTV</h1>
+    {{if .Notice}}<p class="banner">{{.Notice}}</p>{{end}}
+    {{if .Signed}}<p class="section-subtitle">DirecTV session is stored.</p>{{end}}
+    {{if .Pending}}
+    <p class="section-subtitle">{{.Prompt}}</p>
+    <form method="post" action="{{.Action}}">
+      <label class="url-label" for="code">Code</label>
+      <input class="url-field" id="code" name="code" autocomplete="one-time-code" inputmode="numeric">
+      <button class="epg-button" type="submit">Continue</button>
+    </form>
+    {{end}}
+  </div>
+</body>
+</html>
+`))
+
 type tunerEntry struct {
 	N    int
 	Path string
+}
+
+type tvePageLink struct {
+	Name     string
+	Channels int
+	Playlist string
+	Guide    string
 }
 
 type pageData struct {
@@ -481,6 +711,19 @@ type pageData struct {
 	PlaylistURL  string
 	EPGURL       string
 	Tuners       []tunerEntry
+	TVE          []tvePageLink
+	TVENotice    string
+	TVEPrompt    string
+	TVEPending   bool
+	TVESignInURL string
+}
+
+type signInPage struct {
+	Notice  string
+	Prompt  string
+	Signed  bool
+	Pending bool
+	Action  string
 }
 
 // withToken appends the shared secret as a query parameter when the gate is
@@ -526,6 +769,21 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(tuners) > 0 {
 		data.PlaylistURL = base + tuners[0].Path
+	}
+	if s.tve != nil {
+		view := s.tve.SignIn()
+		data.TVENotice = view.Notice
+		data.TVEPrompt = view.Prompt
+		data.TVEPending = view.Pending
+		data.TVESignInURL = s.tveURL(base, "/tve/directv")
+		for _, link := range s.tve.List() {
+			data.TVE = append(data.TVE, tvePageLink{
+				Name:     link.Name,
+				Channels: link.Channels,
+				Playlist: s.tveURL(base, "/tve/"+link.ID+".m3u"),
+				Guide:    s.tveURL(base, "/tve/"+link.ID+".xml"),
+			})
+		}
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
