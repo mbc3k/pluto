@@ -2,8 +2,9 @@
 # Multi-stage build: compile in a Go toolchain image, run from scratch.
 # Compatible with Docker, Podman, Buildah, and Apple's container framework.
 #
-# Build:
+# Build (Apple container, or Docker/Podman with -f because this file is not named Dockerfile):
 #   container build -t pluto .
+#   docker build -f Containerfile -t pluto .
 #
 # Run (Apple container framework):
 #   container run --rm -it \
