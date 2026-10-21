@@ -42,3 +42,29 @@ func TestGenerate_emptyChannels(t *testing.T) {
 		t.Fatalf("got %q", out)
 	}
 }
+
+func TestGenerate_sanitizesNameAndEscapesURL(t *testing.T) {
+	channels := []pluto.Channel{{
+		ID:       "a/b",
+		Name:     "Bad\n#EXTINF:-1,Injected",
+		Slug:     "s",
+		Category: "News",
+	}}
+	out := Generate(1, "a+b/c=", "?already=1", channels)
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("newline injected an entry: %q", lines)
+	}
+	if !strings.Contains(out, "jwt=a%2Bb%2Fc%3D") {
+		t.Fatalf("token not escaped:\n%s", out)
+	}
+	if !strings.Contains(out, "?already=1&jwt=") {
+		t.Fatalf("leading ? on stitcher params was kept:\n%s", out)
+	}
+	if !strings.Contains(out, "/channel/a%2Fb/master.m3u8?") {
+		t.Fatalf("channel id not path-escaped:\n%s", out)
+	}
+	if strings.Contains(out, "Bad\n") {
+		t.Fatalf("raw newline in name:\n%s", out)
+	}
+}

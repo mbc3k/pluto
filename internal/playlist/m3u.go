@@ -2,6 +2,7 @@ package playlist
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/mbc3k/pluto/internal/pluto"
@@ -25,6 +26,9 @@ func Generate(startChannel int, token, stitcherParams string, channels []pluto.C
 
 	// Query suffix shared by every stream URL (credentials don't vary per channel).
 	// Pattern: ?{stitcherParams}&jwt={token}&masterJWTPassthrough=true&includeExtendedEvents=true
+	stitcherParams = strings.TrimPrefix(strings.TrimSpace(stitcherParams), "?")
+	stitcherParams = strings.TrimPrefix(stitcherParams, "&")
+
 	var query strings.Builder
 	query.Grow(len(stitcherParams) + len(token) + 64)
 	query.WriteByte('?')
@@ -33,7 +37,7 @@ func Generate(startChannel int, token, stitcherParams string, channels []pluto.C
 		query.WriteByte('&')
 	}
 	query.WriteString("jwt=")
-	query.WriteString(token)
+	query.WriteString(url.QueryEscape(token))
 	query.WriteString("&masterJWTPassthrough=true&includeExtendedEvents=true")
 	querySuffix := query.String()
 
@@ -43,24 +47,36 @@ func Generate(startChannel int, token, stitcherParams string, channels []pluto.C
 	for i := range channels {
 		ch := &channels[i]
 		chNum := startChannel + i
+		name := m3uText(ch.Name)
 
 		// %q keeps attribute values safely quoted if names contain special chars.
 		fmt.Fprintf(&b,
 			"#EXTINF:-1 tvg-id=%q tvg-name=%q tvg-logo=%q tvg-chno=%d channel-id=%q group-title=%q,%s\n",
-			ch.Slug,
-			ch.Name,
-			ch.ColorLogoPNG.Path,
+			m3uText(ch.Slug),
+			name,
+			m3uText(ch.ColorLogoPNG.Path),
 			chNum,
-			ch.ID,
-			ch.Category,
-			ch.Name,
+			m3uText(ch.ID),
+			m3uText(ch.Category),
+			name,
 		)
 		b.WriteString(pathPrefix)
-		b.WriteString(ch.ID)
+		b.WriteString(url.PathEscape(ch.ID))
 		b.WriteString(pathSuffix)
 		b.WriteString(querySuffix)
 		b.WriteByte('\n')
 	}
 
 	return b.String()
+}
+
+// m3uText keeps a field on one physical line. A raw newline in a channel
+// name would otherwise start a new playlist entry.
+func m3uText(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
 }

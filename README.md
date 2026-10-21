@@ -21,10 +21,14 @@ All configuration is via environment variables (or a flat `KEY=value` file at `/
 |---|---|---|
 | `PLUTO_EMAIL` | **required** | Pluto TV account email |
 | `PLUTO_PASSWORD` | **required** | Pluto TV account password |
-| `PORT` | `8080` | HTTP listen port |
+| `PORT` | `8080` | HTTP listen port (1–65535) |
 | `START_CHANNEL` | `10000` | First channel number assigned in the M3U |
 | `TUNER_COUNT` | `12` | Number of independent tuner sessions (1–12) |
-| `DEVICE_ID_FILE` | `/opt/local/etc/pluto-devices.conf` | Where stable per-tuner UUIDs are persisted |
+| `DEVICE_ID_FILE` | `/opt/local/etc/pluto-devices.conf` | Where stable per-tuner UUIDs are persisted. The parent directory is created if needed. |
+| `PLUTO_CONFIG` | (search path below) | Optional path to a `KEY=value` file |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
+
+If `PLUTO_CONFIG` is unset, the process reads the first file that exists among `/opt/local/etc/pluto.conf` (SmartOS), `/usr/local/etc/pluto.conf` (macOS), and `/etc/pluto.conf` (Linux). Environment variables override the file. Values may be quoted, and an optional `export ` prefix is accepted. Boot credentials are redacted from errors and logs.
 
 ## Endpoints
 

@@ -1,9 +1,9 @@
-**Never go dark**: `cache.SetAll()` is only called on success. A failed refresh logs an error and serves the previous cache until the next retry. `SetAll` also invalidates lazily-cached per-tuner M3Us.
+**Never go dark**: `cache.SetAll()` is only called on success, and it refuses an empty channel list or EPG so a bad payload cannot wipe the last good snapshot. A failed refresh logs an error and serves the previous cache until the next retry. `SetAll` also invalidates lazily-cached per-tuner M3Us.
 
-**JWT lifetime controls** (auth/session.go): `tokenRefreshMargin = 1h`, `maxTokenAge = 2h`. `EnsureFresh` (called on every M3U request and by the scheduler) forces re-auth if the token is within the margin of expiry *or* if the token has been handed out for > maxTokenAge. This mitigates 401s caused by Channels DVR consuming stale M3U entries. 401s from the stitcher are intentionally not retried inside RetryClient; the per-request refresh in server.go is the mitigation.
+**JWT lifetime controls** (auth/session.go): `tokenRefreshMargin = 1h`, `maxTokenAge = 2h`. `EnsureFresh` (called on every M3U request and by the scheduler) forces re-auth if the token is within the margin of expiry *or* if it was issued more than `maxTokenAge` ago. Handing a playlist out does not extend that age. 401s from the stitcher are intentionally not retried inside RetryClient; the per-request refresh in server.go is the mitigation. Boot credentials are redacted from errors and logs.
 
-**M3U path**: On each playlist request the server calls `EnsureFresh` then `Credentials()` (one lock: token + stitcherParams + `tokenGen`). The M3U string is rebuilt only when `tokenGen` or channel data changes; otherwise the cached string is served. The scheduler does **not** pre-build M3Us — only channels + XMLTV.
+**M3U path**: On each playlist request the server calls `EnsureFresh` then `Credentials()` (one lock: token + stitcherParams + `tokenGen`). The M3U string is rebuilt only when `tokenGen` or channel data changes; otherwise the cached string is served. A playlist is cached only if the channel generation it was built from is still current. The scheduler does **not** pre-build M3Us — only channels + XMLTV. A tuner re-auth failure does not skip the guide update.
 
-**EPG fetch**: Four 6-hour windows are fetched concurrently and merged (see `pluto.FetchChannels`).
+**EPG fetch**: Four 6-hour windows are fetched concurrently and merged (see `pluto.FetchChannels`). Overlapping programmes are deduped and channel order is a stable sort.
 
-**Goroutine topology**: main context → HTTP server goroutine + scheduler goroutine. SIGTERM cancels the context, stops the scheduler, then drains the HTTP server with a 30s timeout.
+**Goroutine topology**: main context → HTTP server goroutine + scheduler goroutine. SIGTERM cancels the context (including in-flight startup auth), stops the scheduler, then drains the HTTP server with a 30s timeout.

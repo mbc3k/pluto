@@ -3,6 +3,7 @@ package epg
 import (
 	"encoding/xml"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/mbc3k/pluto/internal/pluto"
@@ -20,9 +21,9 @@ type tv struct {
 }
 
 type xChannel struct {
-	ID          string      `xml:"id,attr"`
-	DisplayName []langText  `xml:"display-name"`
-	Icon        *icon       `xml:"icon,omitempty"`
+	ID          string     `xml:"id,attr"`
+	DisplayName []langText `xml:"display-name"`
+	Icon        *icon      `xml:"icon,omitempty"`
 }
 
 type programme struct {
@@ -52,8 +53,8 @@ type epNum struct {
 }
 
 type rating struct {
-	System string    `xml:"system,attr"`
-	Value  langText  `xml:"value"`
+	System string   `xml:"system,attr"`
+	Value  langText `xml:"value"`
 }
 
 // Generate builds a complete XMLTV document from the given channel list.
@@ -74,7 +75,11 @@ func Generate(channels []pluto.Channel) ([]byte, error) {
 		ch := &channels[i]
 		doc.Channels = append(doc.Channels, buildChannel(ch))
 		for j := range ch.Timelines {
-			doc.Programmes = append(doc.Programmes, buildProgramme(ch.Slug, ch.Category, &ch.Timelines[j]))
+			tl := &ch.Timelines[j]
+			if tl.Start.IsZero() || !tl.Stop.After(tl.Start) {
+				continue
+			}
+			doc.Programmes = append(doc.Programmes, buildProgramme(ch.Slug, ch.Category, tl))
 		}
 	}
 
@@ -91,14 +96,18 @@ func Generate(channels []pluto.Channel) ([]byte, error) {
 }
 
 func buildChannel(ch *pluto.Channel) xChannel {
+	name := xmlSafe(ch.Name)
+	if name == "" {
+		name = xmlSafe(ch.Slug)
+	}
 	xch := xChannel{
-		ID: ch.Slug,
+		ID: xmlSafe(ch.Slug),
 		DisplayName: []langText{
-			{Lang: "en", Value: ch.Name},
+			{Lang: "en", Value: name},
 		},
 	}
-	if ch.ColorLogoPNG.Path != "" {
-		xch.Icon = &icon{Src: ch.ColorLogoPNG.Path}
+	if src := xmlSafe(ch.ColorLogoPNG.Path); src != "" {
+		xch.Icon = &icon{Src: src}
 	}
 	return xch
 }
@@ -110,45 +119,59 @@ func isFilm(p *pluto.Program) bool {
 
 // programmeCategory returns the XMLTV category for a program.
 // Films get "Movie" so DVR software files them correctly.
-// Other programs get the channel's Pluto category (e.g. "Kids", "News")
-// plus the episode genre when available.
+// Other programs get the episode genre and the channel category when those
+// differ from categories already added.
 func programmeCategory(channelCategory string, p *pluto.Program) []langText {
 	var cats []langText
 	if isFilm(p) {
-		cats = append(cats, langText{Lang: "en", Value: "Movie"})
+		cats = addCategory(cats, "Movie")
 	}
-	if p.Episode.Genre != "" {
-		cats = append(cats, langText{Lang: "en", Value: p.Episode.Genre})
-	}
-	if p.Episode.SubGenre != "" && p.Episode.SubGenre != p.Episode.Genre {
-		cats = append(cats, langText{Lang: "en", Value: p.Episode.SubGenre})
-	}
-	if channelCategory != "" && channelCategory != p.Episode.Genre {
-		cats = append(cats, langText{Lang: "en", Value: channelCategory})
-	}
+	cats = addCategory(cats, p.Episode.Genre)
+	cats = addCategory(cats, p.Episode.SubGenre)
+	cats = addCategory(cats, channelCategory)
 	return cats
 }
 
+func addCategory(cats []langText, value string) []langText {
+	value = xmlSafe(value)
+	if value == "" {
+		return cats
+	}
+	for _, c := range cats {
+		if c.Value == value {
+			return cats
+		}
+	}
+	return append(cats, langText{Lang: "en", Value: value})
+}
+
 func buildProgramme(channelSlug, channelCategory string, p *pluto.Program) programme {
+	title := xmlSafe(p.Title)
+	if title == "" {
+		title = xmlSafe(p.Episode.Name)
+	}
+	if title == "" {
+		title = "Unknown"
+	}
 	prog := programme{
 		Start:   formatXMLTVTime(p.Start),
 		Stop:    formatXMLTVTime(p.Stop),
-		Channel: channelSlug,
+		Channel: xmlSafe(channelSlug),
 		Title: []langText{
-			{Lang: "en", Value: p.Title},
+			{Lang: "en", Value: title},
 		},
 	}
 
 	// Episode name as sub-title when present and distinct from title.
-	if p.Episode.Name != "" && p.Episode.Name != p.Title {
+	if name := xmlSafe(p.Episode.Name); name != "" && name != title {
 		prog.SubTitle = []langText{
-			{Lang: "en", Value: p.Episode.Name},
+			{Lang: "en", Value: name},
 		}
 	}
 
-	if p.Episode.Description != "" {
+	if desc := xmlSafe(p.Episode.Description); desc != "" {
 		prog.Desc = []langText{
-			{Lang: "en", Value: p.Episode.Description},
+			{Lang: "en", Value: desc},
 		}
 	}
 
@@ -165,10 +188,10 @@ func buildProgramme(channelSlug, channelCategory string, p *pluto.Program) progr
 		}
 	}
 
-	if p.Episode.Rating != "" {
+	if rated := xmlSafe(p.Episode.Rating); rated != "" {
 		prog.Rating = &rating{
 			System: "VCHIP",
-			Value:  langText{Lang: "en", Value: p.Episode.Rating},
+			Value:  langText{Lang: "en", Value: rated},
 		}
 	}
 
@@ -177,4 +200,25 @@ func buildProgramme(channelSlug, channelCategory string, p *pluto.Program) progr
 
 func formatXMLTVTime(t time.Time) string {
 	return t.UTC().Format(xmltvTimeFormat)
+}
+
+// xmlSafe strips characters XML 1.0 cannot represent. One bad title would
+// otherwise fail the whole document and block the guide update.
+func xmlSafe(s string) string {
+	if s == "" || strings.IndexFunc(s, illegalXMLRune) == -1 {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if illegalXMLRune(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+func illegalXMLRune(r rune) bool {
+	return !(r == 0x9 || r == 0xA || r == 0xD ||
+		(r >= 0x20 && r <= 0xD7FF) ||
+		(r >= 0xE000 && r <= 0xFFFD) ||
+		(r >= 0x10000 && r <= 0x10FFFF))
 }
