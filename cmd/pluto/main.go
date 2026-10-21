@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -23,6 +25,7 @@ import (
 var version = "dev"
 
 func main() {
+	setupLogger()
 	slog.Info("pluto starting", "version", version)
 
 	cfg, err := config.Load()
@@ -39,19 +42,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Root context cancelled on SIGTERM/SIGINT, including during startup auth.
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer cancel()
+
 	// Authenticate all sessions concurrently before starting the server.
 	slog.Info("authenticating tuners", "count", cfg.TunerCount)
-	if err := authenticateAll(context.Background(), sessions); err != nil {
+	if err := authenticateAll(ctx, sessions); err != nil {
 		slog.Error("initial authentication failed", "err", err)
 		os.Exit(1)
 	}
 
 	c := cache.New(cfg.TunerCount)
 	srv := server.New(c, sessions, cfg, version)
-
-	// Root context cancelled on SIGTERM/SIGINT.
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer cancel()
 
 	var wg sync.WaitGroup
 
@@ -86,12 +89,30 @@ func main() {
 	slog.Info("stopped")
 }
 
+func setupLogger() {
+	level := slog.LevelInfo
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv("LOG_LEVEL")))
+	switch raw {
+	case "", "info":
+		level = slog.LevelInfo
+	case "debug":
+		level = slog.LevelDebug
+	case "warn", "warning":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	default:
+		slog.Warn("unknown LOG_LEVEL, using info", "value", os.Getenv("LOG_LEVEL"))
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+}
+
 // bootConcurrency limits how many tuner boot requests run simultaneously
 // to avoid bursting Pluto TV's auth endpoint.
 const bootConcurrency = 3
 
 // authenticateAll authenticates all sessions concurrently (up to bootConcurrency
-// at a time) and returns the first error encountered, if any.
+// at a time) and returns every error encountered.
 func authenticateAll(ctx context.Context, sessions []*auth.Session) error {
 	errs := make([]error, len(sessions))
 	sem := make(chan struct{}, bootConcurrency)
@@ -111,10 +132,11 @@ func authenticateAll(ctx context.Context, sessions []*auth.Session) error {
 		}(i, s)
 	}
 	wg.Wait()
-	for _, err := range errs {
+	var joined []error
+	for i, err := range errs {
 		if err != nil {
-			return err
+			joined = append(joined, fmt.Errorf("tuner %d: %w", i+1, err))
 		}
 	}
-	return nil
+	return errors.Join(joined...)
 }
