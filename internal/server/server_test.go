@@ -1,13 +1,16 @@
 package server
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mbc3k/pluto/internal/cache"
 	"github.com/mbc3k/pluto/internal/config"
@@ -229,5 +232,223 @@ func TestDisplayVersionAndBracketHost(t *testing.T) {
 	}
 	if bracketHost("[::1]:8080") != "[::1]:8080" || bracketHost("::1") != "[::1]" || bracketHost("localhost:8080") != "localhost:8080" {
 		t.Fatalf("%q %q %q", bracketHost("[::1]:8080"), bracketHost("::1"), bracketHost("localhost:8080"))
+	}
+}
+
+func TestPlaylistWaitsForInitialAuth(t *testing.T) {
+	fake := &fakeTuner{token: "jwt-token", params: "deviceId=abc", gen: 1}
+	s := newTestServer(t, []Tuner{fake}, true)
+	s.HoldAuth()
+
+	rr := do(s, http.MethodGet, "/health", nil)
+	if rr.Code != http.StatusServiceUnavailable || !strings.Contains(rr.Body.String(), "authenticating") {
+		t.Fatalf("health while signing in: %d %q", rr.Code, rr.Body.String())
+	}
+	rr = do(s, http.MethodGet, "/tuner-1-playlist.m3u", nil)
+	if rr.Code != http.StatusServiceUnavailable || !strings.Contains(rr.Body.String(), "authenticating") {
+		t.Fatalf("playlist while signing in: %d %q", rr.Code, rr.Body.String())
+	}
+	if fake.calls != 0 {
+		t.Fatalf("EnsureFresh ran during initial auth: %d", fake.calls)
+	}
+	rr = do(s, http.MethodGet, "/epg.xml", nil)
+	if rr.Code != http.StatusOK || rr.Body.String() != "<tv></tv>\n" {
+		t.Fatalf("epg during auth: %d %q", rr.Code, rr.Body.String())
+	}
+	rr = do(s, http.MethodGet, "/", nil)
+	if !strings.Contains(rr.Body.String(), "signing in") || strings.Contains(rr.Body.String(), "Still loading") {
+		t.Fatalf("index banner:\n%s", rr.Body.String())
+	}
+
+	s.ReleaseAuth()
+	rr = do(s, http.MethodGet, "/", nil)
+	if strings.Contains(rr.Body.String(), "signing in") || strings.Contains(rr.Body.String(), "Still loading") {
+		t.Fatalf("ready index still warming:\n%s", rr.Body.String())
+	}
+	rr = do(s, http.MethodGet, "/health", nil)
+	if rr.Code != http.StatusOK || rr.Body.String() != "ok" {
+		t.Fatalf("health after auth: %d %q", rr.Code, rr.Body.String())
+	}
+	rr = do(s, http.MethodGet, "/tuner-1-playlist.m3u", nil)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "jwt=jwt-token") {
+		t.Fatalf("playlist after auth: %d %q", rr.Code, rr.Body.String())
+	}
+	if fake.calls != 1 {
+		t.Fatalf("EnsureFresh calls %d", fake.calls)
+	}
+
+	empty := cache.New(1)
+	s2 := newServer(empty, []Tuner{fake}, s.cfg, "1.2.3")
+	rr = do(s2, http.MethodGet, "/", nil)
+	if !strings.Contains(rr.Body.String(), "Still loading the channel guide") {
+		t.Fatalf("guide banner:\n%s", rr.Body.String())
+	}
+}
+
+func TestAccessTokenGate(t *testing.T) {
+	fake := &fakeTuner{token: "jwt-token", params: "deviceId=abc", gen: 1}
+	s := newTestServer(t, []Tuner{fake}, true)
+	s.cfg.AccessToken = "sekret"
+	s.cfg.GuideHours = 36
+	s.cfg.RefreshEvery = 3 * time.Hour
+	s.cfg.BindAddr = "127.0.0.1"
+
+	rr := do(s, http.MethodGet, "/tuner-1-playlist.m3u", nil)
+	if rr.Code != http.StatusUnauthorized || fake.calls != 0 {
+		t.Fatalf("open playlist %d calls %d", rr.Code, fake.calls)
+	}
+	rr = do(s, http.MethodGet, "/epg.xml", nil)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("open epg %d", rr.Code)
+	}
+	rr = do(s, http.MethodGet, "/t/nope/epg.xml", nil)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong path token %d", rr.Code)
+	}
+	rr = do(s, http.MethodGet, "/health", nil)
+	if rr.Code != http.StatusOK || rr.Body.String() != "ok" {
+		t.Fatalf("health stays open: %d %q", rr.Code, rr.Body.String())
+	}
+	rr = do(s, http.MethodGet, "/metrics", nil)
+	if rr.Code != http.StatusOK || strings.Contains(rr.Body.String(), "sekret") {
+		t.Fatalf("metrics leaked or failed: %d\n%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "pluto_http_responses_total{handler=\"auth\",code=\"401\"} 3\n") {
+		t.Fatalf("auth counter:\n%s", rr.Body.String())
+	}
+
+	rr = do(s, http.MethodGet, "/tuner-1-playlist.m3u?token=sekret", nil)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "jwt=jwt-token") {
+		t.Fatalf("query token playlist: %d %q", rr.Code, rr.Body.String())
+	}
+	rr = do(s, http.MethodGet, "/epg.xml?token=sekret", nil)
+	if rr.Code != http.StatusOK || rr.Body.String() != "<tv></tv>\n" {
+		t.Fatalf("query token epg: %d %q", rr.Code, rr.Body.String())
+	}
+	rr = do(s, http.MethodGet, "/t/sekret/xmltv.xml", nil)
+	if rr.Code != http.StatusOK || rr.Body.String() != "<tv></tv>\n" {
+		t.Fatalf("path token epg: %d %q", rr.Code, rr.Body.String())
+	}
+	rr = do(s, http.MethodGet, "/t/sekret/tuner1/channels.m3u", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("path token legacy playlist: %d %s", rr.Code, rr.Body.String())
+	}
+
+	rr = do(s, http.MethodGet, "/status", nil)
+	var status map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status["access_token"] != true || status["auth_ready"] != true || status["guide_hours"] != float64(36) || status["bind_addr"] != "127.0.0.1" {
+		t.Fatalf("status knobs %#v", status)
+	}
+	if status["refresh_every"] != "3h0m0s" {
+		t.Fatalf("refresh_every %v", status["refresh_every"])
+	}
+	if status["epg_url"] != "http://example.com/epg.xml?token=sekret" {
+		t.Fatalf("epg_url %v", status["epg_url"])
+	}
+	tuners, _ := status["tuners"].([]any)
+	if len(tuners) != 1 || tuners[0] != "http://example.com/tuner-1-playlist.m3u?token=sekret" {
+		t.Fatalf("tuners %#v", tuners)
+	}
+	rr = do(s, http.MethodGet, "/", nil)
+	if !strings.Contains(rr.Body.String(), "http://example.com/epg.xml?token=sekret") {
+		t.Fatalf("index missed tokenized epg:\n%s", rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "Still loading") {
+		t.Fatal("ready index showed the guide banner")
+	}
+}
+
+func TestGzipPlaylistAndEPG(t *testing.T) {
+	s := newTestServer(t, []Tuner{&fakeTuner{token: "jwt", gen: 1}}, true)
+	plain := do(s, http.MethodGet, "/epg.xml", nil)
+	if plain.Header().Get("Content-Encoding") != "" {
+		t.Fatal("uncompressed response set Content-Encoding")
+	}
+	if plain.Header().Get("Content-Length") == "" {
+		t.Fatal("plain response missing Content-Length")
+	}
+
+	rr := do(s, http.MethodGet, "/epg.xml", map[string]string{"Accept-Encoding": "br, gzip;q=0.8"})
+	if rr.Header().Get("Content-Encoding") != "gzip" || rr.Header().Get("Vary") != "Accept-Encoding" {
+		t.Fatalf("gzip headers: %v", rr.Header())
+	}
+	if rr.Header().Get("Content-Length") != "" {
+		t.Fatalf("gzip Content-Length %q", rr.Header().Get("Content-Length"))
+	}
+	zr, err := gzip.NewReader(rr.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != plain.Body.String() {
+		t.Fatalf("gunzip %q want %q", got, plain.Body.String())
+	}
+
+	rr = do(s, http.MethodGet, "/tuner-1-playlist.m3u", map[string]string{"Accept-Encoding": "gzip;q=0"})
+	if rr.Header().Get("Content-Encoding") != "" || !strings.Contains(rr.Body.String(), "jwt=jwt") {
+		t.Fatalf("q=0 should be plain: enc %q body %q", rr.Header().Get("Content-Encoding"), rr.Body.String())
+	}
+	plainPlaylist := do(s, http.MethodGet, "/tuner1/m3u", nil).Body.String()
+	rr = do(s, http.MethodGet, "/tuner-1-playlist.m3u", map[string]string{"Accept-Encoding": "gzip"})
+	if rr.Code != http.StatusOK || rr.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("gzip playlist %d %s", rr.Code, rr.Header().Get("Content-Encoding"))
+	}
+	zr, err = gzip.NewReader(rr.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = io.ReadAll(zr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != plainPlaylist {
+		t.Fatalf("gunzip playlist %q want %q", got, plainPlaylist)
+	}
+
+	rr = do(s, http.MethodGet, "/health", map[string]string{"Accept-Encoding": "gzip"})
+	if rr.Header().Get("Content-Encoding") != "" || rr.Body.String() != "ok" {
+		t.Fatalf("health gzip: %q %q", rr.Header().Get("Content-Encoding"), rr.Body.String())
+	}
+}
+
+func TestMetricsAndListenAddr(t *testing.T) {
+	fake := &fakeTuner{token: "jwt", gen: 1}
+	cfg := &config.Config{Port: 9090, BindAddr: "::1", StartChannel: 10000, GuideHours: 24, TunerCount: 1}
+	s := newServer(cache.New(1), []Tuner{fake}, cfg, "dev")
+	if s.srv.Addr != "[::1]:9090" {
+		t.Fatalf("addr %s", s.srv.Addr)
+	}
+	rr := do(s, http.MethodGet, "/metrics", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatal(rr.Code)
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "text/plain; version=0.0.4; charset=utf-8" {
+		t.Fatalf("content type %q", ct)
+	}
+	if !strings.Contains(rr.Body.String(), "pluto_ready 0\n") || !strings.Contains(rr.Body.String(), "pluto_auth_ready 1\n") {
+		t.Fatalf("gauges:\n%s", rr.Body.String())
+	}
+	if err := s.cache.SetAll([]pluto.Channel{{ID: "a", Name: "A"}}, []byte("<tv/>")); err != nil {
+		t.Fatal(err)
+	}
+	rr = do(s, http.MethodGet, "/tuner-1-playlist.m3u", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatal(rr.Code)
+	}
+	rr = do(s, http.MethodGet, "/metrics", nil)
+	if !strings.Contains(rr.Body.String(), "pluto_ready 1\n") {
+		t.Fatalf("ready gauge:\n%s", rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "pluto_http_responses_total{handler=\"playlist\",code=\"200\"} 1\n") {
+		t.Fatalf("playlist counter:\n%s", rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "pluto_guide_hours 24\n") {
+		t.Fatalf("guide hours:\n%s", rr.Body.String())
 	}
 }

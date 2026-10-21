@@ -29,28 +29,50 @@ var slugPrefixMap = map[string]bool{
 // channelsAPI is the Pluto channel guide. Tests point it at a local server.
 var channelsAPI = "https://api.pluto.tv/v2/channels"
 
-const (
-	// epgWindows is the number of consecutive 6-hour windows that make a 24h EPG.
-	epgWindows = 4
-)
+const windowFetchConcurrency = 4
+
+// WindowsForHours is how many 6-hour Pluto guide windows cover the requested
+// span. Non-positive falls back to 24 hours. The result is capped at 72 hours.
+func WindowsForHours(hours int) int {
+	if hours <= 0 {
+		hours = 24
+	}
+	if hours < 6 {
+		hours = 6
+	}
+	n := (hours + 5) / 6
+	if n > 12 {
+		n = 12
+	}
+	return n
+}
 
 // FetchChannels retrieves the full channel list with timeline data from
-// the Pluto TV API. It fetches 4 concurrent 6-hour windows to build a
-// full 24-hour EPG, merging timeline entries across responses.
-func FetchChannels(ctx context.Context, client *RetryClient) ([]Channel, error) {
+// the Pluto TV API. It fetches consecutive 6-hour windows (at most four at
+// a time) covering guideHours and merges timeline entries across responses.
+func FetchChannels(ctx context.Context, client *RetryClient, guideHours int) ([]Channel, error) {
+	n := WindowsForHours(guideHours)
 	now := time.Now().UTC().Truncate(6 * time.Hour)
 
 	type windowResult struct {
 		channels []Channel
 		err      error
 	}
-	results := make([]windowResult, epgWindows)
+	results := make([]windowResult, n)
 
+	sem := make(chan struct{}, windowFetchConcurrency)
 	var wg sync.WaitGroup
-	for i := 0; i < epgWindows; i++ {
+	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				results[i] = windowResult{err: ctx.Err()}
+				return
+			}
+			defer func() { <-sem }()
 			start := now.Add(time.Duration(i) * 6 * time.Hour)
 			stop := start.Add(6 * time.Hour)
 			ch, err := fetchWindow(ctx, client, start, stop)
@@ -59,7 +81,7 @@ func FetchChannels(ctx context.Context, client *RetryClient) ([]Channel, error) 
 	}
 	wg.Wait()
 
-	windows := make([][]Channel, 0, epgWindows)
+	windows := make([][]Channel, 0, n)
 	for i, res := range results {
 		if res.err != nil {
 			return nil, fmt.Errorf("window %d: %w", i, res.err)

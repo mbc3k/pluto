@@ -1,7 +1,9 @@
 package server
 
 import (
+	"compress/gzip"
 	"context"
+	"crypto/subtle"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -9,13 +11,17 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mbc3k/pluto/internal/auth"
 	"github.com/mbc3k/pluto/internal/cache"
 	"github.com/mbc3k/pluto/internal/config"
+	"github.com/mbc3k/pluto/internal/metrics"
 	"github.com/mbc3k/pluto/internal/playlist"
 )
 
@@ -33,11 +39,19 @@ type Tuner interface {
 
 // Server is the HTTP server for serving playlists and EPG data.
 type Server struct {
-	srv      *http.Server
-	cache    *cache.Cache
-	cfg      *config.Config
-	sessions []Tuner
-	version  string
+	srv       *http.Server
+	cache     *cache.Cache
+	cfg       *config.Config
+	sessions  []Tuner
+	version   string
+	authReady atomic.Bool
+	metrics   *metrics.Recorder
+}
+
+var gzipPool = sync.Pool{
+	New: func() any {
+		return gzip.NewWriter(io.Discard)
+	},
 }
 
 // New creates a Server wired to the given cache, config, and sessions.
@@ -51,13 +65,16 @@ func New(c *cache.Cache, sessions []*auth.Session, cfg *config.Config, version s
 }
 
 func newServer(c *cache.Cache, tuners []Tuner, cfg *config.Config, version string) *Server {
-	s := &Server{cache: c, cfg: cfg, sessions: tuners, version: version}
+	s := &Server{cache: c, cfg: cfg, sessions: tuners, version: version, metrics: metrics.New()}
+	// Tests and any caller that does not HoldAuth serve playlists immediately.
+	s.authReady.Store(true)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/style.css", s.handleCSS)
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/status", s.handleStatus)
+	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/epg.xml", s.handleEPG)
 	mux.HandleFunc("/xmltv.xml", s.handleEPG)
 
@@ -72,8 +89,8 @@ func newServer(c *cache.Cache, tuners []Tuner, cfg *config.Config, version strin
 	}
 
 	s.srv = &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.Port),
-		Handler:      securityHeaders(mux),
+		Addr:         cfg.ListenAddr(),
+		Handler:      securityHeaders(s.gate(mux)),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  120 * time.Second,
@@ -81,6 +98,18 @@ func newServer(c *cache.Cache, tuners []Tuner, cfg *config.Config, version strin
 
 	return s
 }
+
+// HoldAuth makes playlist requests wait until ReleaseAuth. The guide can
+// still be served. main calls this before Listen so a request cannot land
+// in the window before the flag flips.
+func (s *Server) HoldAuth() { s.authReady.Store(false) }
+
+// ReleaseAuth lets playlist requests call EnsureFresh. It runs even when
+// the initial sign-in failed, so the next playlist request retries the boot.
+func (s *Server) ReleaseAuth() { s.authReady.Store(true) }
+
+// Metrics is the recorder the scheduler updates after each guide refresh.
+func (s *Server) Metrics() *metrics.Recorder { return s.metrics }
 
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -90,10 +119,85 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
+// gate checks ACCESS_TOKEN for playlist and EPG URLs. An empty token leaves
+// every route open. Channels DVR cannot send an Authorization header, so the
+// secret is accepted as ?token= or as a /t/<token>/ prefix. Either match is
+// enough. /health, /metrics, /status, and / stay open so an operator can see
+// whether the process is up and copy a URL that already includes the secret.
+func (s *Server) gate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := s.cfg.AccessToken
+		if token == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/t/") {
+			rest := strings.TrimPrefix(r.URL.Path, "/t/")
+			got, suffix, ok := strings.Cut(rest, "/")
+			if !ok || !tokenMatch(got, token) {
+				s.metrics.Hit("auth", http.StatusUnauthorized)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			r2 := r.Clone(r.Context())
+			r2.URL.Path = "/" + suffix
+			next.ServeHTTP(w, r2)
+			return
+		}
+		if isProtectedPath(r.URL.Path) && !tokenMatch(r.URL.Query().Get("token"), token) {
+			s.metrics.Hit("auth", http.StatusUnauthorized)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func tokenMatch(got, want string) bool {
+	if len(got) != len(want) {
+		subtle.ConstantTimeCompare([]byte(want), []byte(want))
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
+func isProtectedPath(path string) bool {
+	switch path {
+	case "/epg.xml", "/xmltv.xml":
+		return true
+	}
+	if strings.HasPrefix(path, "/tuner-") && strings.HasSuffix(path, "-playlist.m3u") {
+		mid := strings.TrimSuffix(strings.TrimPrefix(path, "/tuner-"), "-playlist.m3u")
+		return mid != "" && allDigits(mid)
+	}
+	if !strings.HasPrefix(path, "/tuner") {
+		return false
+	}
+	rest := strings.TrimPrefix(path, "/tuner")
+	i := strings.IndexByte(rest, '/')
+	if i <= 0 {
+		return false
+	}
+	suf := rest[i:]
+	if suf != "/channels.m3u" && suf != "/m3u" {
+		return false
+	}
+	return allDigits(rest[:i])
+}
+
+func allDigits(s string) bool {
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // ListenAndServe starts the HTTP server. It returns http.ErrServerClosed
 // after Shutdown is called.
 func (s *Server) ListenAndServe() error {
-	slog.Info("HTTP server listening", "addr", s.srv.Addr)
+	slog.Info("HTTP server listening", "addr", s.srv.Addr, "access_gate", s.cfg.AccessToken != "")
 	return s.srv.ListenAndServe()
 }
 
@@ -110,7 +214,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) makeM3UHandler(idx int) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if idx < 0 || idx >= len(s.sessions) {
+			s.metrics.Hit("playlist", http.StatusBadRequest)
 			http.Error(w, "tuner index out of range", http.StatusBadRequest)
+			return
+		}
+		// The initial sign-in is still running. Do not call EnsureFresh here:
+		// that would pile duplicate boots onto the startup attempt.
+		if !s.authReady.Load() {
+			s.metrics.Hit("playlist", http.StatusServiceUnavailable)
+			http.Error(w, "tuners still authenticating", http.StatusServiceUnavailable)
 			return
 		}
 		sess := s.sessions[idx]
@@ -125,12 +237,14 @@ func (s *Server) makeM3UHandler(idx int) http.HandlerFunc {
 		token, stitcherParams, gen := sess.Credentials()
 
 		if data, ok := s.cache.GetM3U(idx, gen); ok {
-			writeM3U(w, data, s.cache.LastUpdated())
+			s.metrics.Hit("playlist", http.StatusOK)
+			writeBody(w, r, "application/x-mpegurl", []byte(data), s.cache.LastUpdated())
 			return
 		}
 
 		channels, channelsGen, ok := s.cache.GetChannels()
 		if !ok {
+			s.metrics.Hit("playlist", http.StatusServiceUnavailable)
 			http.Error(w, "playlist not yet available", http.StatusServiceUnavailable)
 			return
 		}
@@ -145,42 +259,107 @@ func (s *Server) makeM3UHandler(idx int) http.HandlerFunc {
 				s.cache.SetM3U(idx, gen, gen2, data)
 			}
 		}
-		writeM3U(w, data, s.cache.LastUpdated())
+		s.metrics.Hit("playlist", http.StatusOK)
+		writeBody(w, r, "application/x-mpegurl", []byte(data), s.cache.LastUpdated())
 	}
 }
 
-func writeM3U(w http.ResponseWriter, data string, updated time.Time) {
-	w.Header().Set("Content-Type", "application/x-mpegurl")
+// writeBody serves a playlist or EPG document, gzip-encoded when the client
+// asks for it. Error responses do not come through here. Content-Length is
+// set only for an uncompressed body so a gzip response is not labeled with
+// the uncompressed size.
+func writeBody(w http.ResponseWriter, r *http.Request, contentType string, body []byte, updated time.Time) {
+	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Vary", "Accept-Encoding")
 	if !updated.IsZero() {
 		w.Header().Set("Last-Modified", updated.UTC().Format(http.TimeFormat))
 	}
-	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-	// WriteString avoids an extra []byte copy of a potentially large playlist.
-	_, _ = io.WriteString(w, data)
+	if acceptsGzip(r) {
+		w.Header().Set("Content-Encoding", "gzip")
+		zw := gzipPool.Get().(*gzip.Writer)
+		zw.Reset(w)
+		_, _ = zw.Write(body)
+		_ = zw.Close()
+		gzipPool.Put(zw)
+		return
+	}
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	_, _ = w.Write(body)
+}
+
+// acceptsGzip reports whether Accept-Encoding lists gzip with a non-zero q.
+func acceptsGzip(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	for _, part := range strings.Split(r.Header.Get("Accept-Encoding"), ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		name := part
+		q := 1.0
+		if i := strings.IndexByte(part, ';'); i >= 0 {
+			name = strings.TrimSpace(part[:i])
+			for _, param := range strings.Split(part[i+1:], ";") {
+				param = strings.TrimSpace(param)
+				if !strings.HasPrefix(param, "q=") {
+					continue
+				}
+				if v, err := strconv.ParseFloat(param[2:], 64); err == nil {
+					q = v
+				}
+			}
+		}
+		if strings.EqualFold(name, "gzip") && q > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) handleEPG(w http.ResponseWriter, r *http.Request) {
 	data, updated, ok := s.cache.GetXMLTV()
 	if !ok {
+		s.metrics.Hit("epg", http.StatusServiceUnavailable)
 		http.Error(w, "EPG not yet available", http.StatusServiceUnavailable)
 		return
 	}
-	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Last-Modified", updated.UTC().Format(http.TimeFormat))
-	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-	_, _ = w.Write(data)
+	s.metrics.Hit("epg", http.StatusOK)
+	writeBody(w, r, "application/xml; charset=utf-8", data, updated)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
+	if !s.authReady.Load() {
+		http.Error(w, "authenticating", http.StatusServiceUnavailable)
+		return
+	}
 	if !s.cache.IsReady() {
 		http.Error(w, "not ready", http.StatusServiceUnavailable)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, "ok")
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	channels, _, _ := s.cache.GetChannels()
+	var last int64
+	if updated := s.cache.LastUpdated(); !updated.IsZero() {
+		last = updated.Unix()
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	s.metrics.Write(w, metrics.Gauges{
+		Ready:       s.cache.IsReady(),
+		AuthReady:   s.authReady.Load(),
+		Channels:    len(channels),
+		Tuners:      len(s.sessions),
+		GuideHours:  s.cfg.GuideHours,
+		LastRefresh: last,
+	})
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -190,18 +369,23 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	tuners := make([]string, len(s.sessions))
 	for i := 1; i <= len(s.sessions); i++ {
-		tuners[i-1] = fmt.Sprintf("%s/tuner-%d-playlist.m3u", base, i)
+		tuners[i-1] = base + s.withToken(fmt.Sprintf("/tuner-%d-playlist.m3u", i))
 	}
 
 	status := map[string]any{
 		"version":       s.version,
 		"ready":         s.cache.IsReady(),
+		"auth_ready":    s.authReady.Load(),
 		"last_updated":  formatTime(updated),
 		"tuner_count":   len(s.sessions),
 		"channels":      len(channels),
 		"start_channel": s.cfg.StartChannel,
+		"refresh_every": s.cfg.RefreshEvery.String(),
+		"guide_hours":   s.cfg.GuideHours,
+		"bind_addr":     s.cfg.BindAddr,
+		"access_token":  s.cfg.AccessToken != "",
 		"tuners":        tuners,
-		"epg_url":       base + "/epg.xml",
+		"epg_url":       base + s.withToken("/epg.xml"),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -292,10 +476,20 @@ type pageData struct {
 	TunerCount   int
 	ChannelCount int
 	Ready        bool
+	AuthReady    bool
 	BaseURL      string
 	PlaylistURL  string
 	EPGURL       string
 	Tuners       []tunerEntry
+}
+
+// withToken appends the shared secret as a query parameter when the gate is
+// on, so the status page and index can be pasted into Channels DVR as-is.
+func (s *Server) withToken(path string) string {
+	if s.cfg.AccessToken == "" {
+		return path
+	}
+	return path + "?token=" + url.QueryEscape(s.cfg.AccessToken)
 }
 
 func (s *Server) handleCSS(w http.ResponseWriter, r *http.Request) {
@@ -314,16 +508,17 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	channels, _, ready := s.cache.GetChannels()
 	tuners := make([]tunerEntry, len(s.sessions))
 	for i := 1; i <= len(s.sessions); i++ {
-		tuners[i-1] = tunerEntry{N: i, Path: fmt.Sprintf("/tuner-%d-playlist.m3u", i)}
+		tuners[i-1] = tunerEntry{N: i, Path: s.withToken(fmt.Sprintf("/tuner-%d-playlist.m3u", i))}
 	}
 
 	data := pageData{
 		Version:      displayVersion(s.version),
 		Ready:        ready,
+		AuthReady:    s.authReady.Load(),
 		ChannelCount: len(channels),
 		TunerCount:   len(s.sessions),
 		BaseURL:      base,
-		EPGURL:       base + "/epg.xml",
+		EPGURL:       base + s.withToken("/epg.xml"),
 		Tuners:       tuners,
 	}
 	if ready {

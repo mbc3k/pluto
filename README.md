@@ -7,11 +7,12 @@ Inspired by [maddox/pluto-for-channels](https://github.com/maddox/pluto-for-chan
 ## How it works
 
 - Authenticates up to 12 independent Pluto TV sessions (one per tuner), each with a stable UUID device ID persisted across restarts
-- Fetches the full channel list and 24 hours of EPG data from the Pluto TV API every 3 hours
+- Fetches the full channel list and a configurable guide window (default 24 hours, in 6-hour slices) from the Pluto TV API on a configurable interval (default every 3 hours)
 - Serves per-tuner M3U playlists at `/tunerN/channels.m3u` and a shared XMLTV EPG at `/epg.xml`
+- Starts listening before the first Pluto sign-in finishes. Playlists return 503 until that attempt completes; the guide is served as soon as it is cached
 - Never goes dark: a failed refresh keeps the previous cache until the next successful one
-- On startup, if the initial fetch fails it retries at 1 min → 5 min → 30 min before settling into the 3-hour cycle
-- Intended to be a drop-in replacement for Jon Maddox's pluto-for-channels Docker container. Same URL format.
+- On startup, if the initial fetch fails it retries at 1 min → 5 min → 30 min before settling into the refresh interval
+- Intended to be a drop-in replacement for Jon Maddox's pluto-for-channels Docker container. Same URL format when the optional access gate is left off.
 
 ## Configuration
 
@@ -22,13 +23,26 @@ All configuration is via environment variables (or a flat `KEY=value` file at `/
 | `PLUTO_EMAIL` | **required** | Pluto TV account email |
 | `PLUTO_PASSWORD` | **required** | Pluto TV account password |
 | `PORT` | `8080` | HTTP listen port (1–65535) |
+| `BIND_ADDR` | (empty) | Host or IP to listen on, without a port. Empty listens on all interfaces (`:PORT`). `127.0.0.1` listens only on loopback. |
+| `ACCESS_TOKEN` | (empty) | Shared secret for playlist and EPG URLs. Empty leaves those URLs open, which is the historical behavior. |
 | `START_CHANNEL` | `10000` | First channel number assigned in the M3U |
 | `TUNER_COUNT` | `12` | Number of independent tuner sessions (1–12) |
+| `REFRESH_EVERY` | `3h` | How often the guide is refreshed. A Go duration (`3h`, `90m`) of at least `1m`. |
+| `GUIDE_HOURS` | `24` | Guide length in hours, from 6 to 72. Rounded up to a multiple of 6 (Pluto's window size). |
 | `DEVICE_ID_FILE` | `/opt/local/etc/pluto-devices.conf` | Where stable per-tuner UUIDs are persisted. The parent directory is created if needed. |
 | `PLUTO_CONFIG` | (search path below) | Optional path to a `KEY=value` file |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
 
-If `PLUTO_CONFIG` is unset, the process reads the first file that exists among `/opt/local/etc/pluto.conf` (SmartOS), `/usr/local/etc/pluto.conf` (macOS), and `/etc/pluto.conf` (Linux). Environment variables override the file. Values may be quoted, and an optional `export ` prefix is accepted. Boot credentials are redacted from errors and logs.
+If `PLUTO_CONFIG` is unset, the process reads the first file that exists among `/opt/local/etc/pluto.conf` (SmartOS), `/usr/local/etc/pluto.conf` (macOS), and `/etc/pluto.conf` (Linux). Environment variables override the file. Values may be quoted, and an optional `export ` prefix is accepted. Boot credentials are redacted from errors and logs. The same keys work as `svccfg setenv` on SmartOS, in a systemd `EnvironmentFile`, or as container `-e` flags.
+
+## Restricting who can fetch playlists
+
+Leave `ACCESS_TOKEN` unset and existing Channels DVR sources keep working with no URL change. Set it when the listener is reachable beyond your own network. Channels DVR cannot send an interactive login, so the secret travels in the URL. Either form is enough:
+
+- Query: `http://host:8080/tuner-1-playlist.m3u?token=YOUR_SECRET` and `http://host:8080/epg.xml?token=YOUR_SECRET`
+- Path: `http://host:8080/t/YOUR_SECRET/tuner-1-playlist.m3u` and `http://host:8080/t/YOUR_SECRET/epg.xml`
+
+`/health` and `/metrics` stay open so a probe does not need the secret. `/` and `/status` also stay open and embed the secret in the playlist and EPG URLs they display, which is what you paste into Channels. Pair the token with `BIND_ADDR` (for example `127.0.0.1`, or the LAN address of the DVR host) so that page is not reachable off-box. The process never logs the token. Responses send `Referrer-Policy: no-referrer`. The token is at most 128 characters and cannot contain a space, `/`, `?`, `#`, `&`, or `%`.
 
 ## Endpoints
 
@@ -37,9 +51,11 @@ If `PLUTO_CONFIG` is unset, the process reads the first file that exists among `
 | `/tuner-N-playlist.m3u` | M3U playlist for tuner N (primary format) |
 | `/tunerN/channels.m3u` | M3U playlist for tuner N (legacy alias) |
 | `/tunerN/m3u` | M3U playlist for tuner N (legacy alias) |
-| `/epg.xml` | XMLTV EPG (also `/xmltv.xml`) |
-| `/health` | `200 ok` when cache is populated, `503` while warming up |
-| `/status` | JSON: version, last refresh time, tuner URLs, EPG URL |
+| `/t/<token>/...` | Same playlist and EPG paths when `ACCESS_TOKEN` is set |
+| `/epg.xml` | XMLTV EPG (also `/xmltv.xml`). Gzip-encoded when the client sends `Accept-Encoding: gzip`. Playlists are too. |
+| `/health` | `200 ok` when the guide is cached. `503 authenticating` until the first sign-in attempt finishes, then `503 not ready` until the guide is cached. |
+| `/status` | JSON: version, auth and guide readiness, refresh interval, guide length, bind address, whether an access token is set (not the token itself), tuner URLs, EPG URL |
+| `/metrics` | Prometheus text exposition (`text/plain; version=0.0.4`): readiness, channel count, refresh totals, and playlist/EPG/auth response counts |
 | `/` | Status page with links to all tuner playlists |
 
 ---

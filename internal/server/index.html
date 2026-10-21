@@ -16,7 +16,9 @@
       <div>
         <span class="version-badge">{{.Version}}</span>
       </div>
-      {{if .Ready}}
+      {{if not .AuthReady}}
+        <div class="banner" role="status">Still signing in to Pluto TV. Playlists will start working when sign-in finishes.</div>
+      {{else if .Ready}}
         <p class="timestamp">{{.ChannelCount}} channel{{if ne .ChannelCount 1}}s{{end}} · updated {{.LastUpdated}}</p>
       {{else}}
         <div class="banner" role="status">Still loading the channel guide. Playlist and EPG links will start working after the first successful refresh.</div>
