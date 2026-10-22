@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -22,29 +23,31 @@ import (
 // Client credentials stay in the session file so a later poll can collect
 // the authn token. They are not logged.
 type Activation struct {
-	Code         string    `json:"code"`
-	URL          string    `json:"url"`
-	Requestor    string    `json:"requestor"`
-	Expires      time.Time `json:"expires"`
-	ClientID     string    `json:"client_id"`
-	ClientSecret string    `json:"client_secret"`
-	AccessToken  string    `json:"access_token"`
-	DeviceID     string    `json:"device_id"`
-	Fingerprint  string    `json:"fingerprint"`
-	PassSFP      string    `json:"pass_sfp,omitempty"`
+	Code          string    `json:"code"`
+	URL           string    `json:"url"`
+	Requestor     string    `json:"requestor"`
+	Expires       time.Time `json:"expires"`
+	ClientID      string    `json:"client_id"`
+	ClientSecret  string    `json:"client_secret"`
+	AccessToken   string    `json:"access_token"`
+	DeviceID      string    `json:"device_id"`
+	Fingerprint   string    `json:"fingerprint"`
+	PassSFP       string    `json:"pass_sfp,omitempty"`
+	AccessExpires time.Time `json:"access_expires,omitempty"`
 }
 
 type adobeSession struct {
-	Requestor    string
-	ClientID     string
-	ClientSecret string
-	AccessToken  string
-	DeviceID     string
-	Fingerprint  string
-	PassSFP      string
-	Code         string
-	CodeExpires  time.Time
-	AuthURL      string
+	Requestor     string
+	ClientID      string
+	ClientSecret  string
+	AccessToken   string
+	DeviceID      string
+	Fingerprint   string
+	PassSFP       string
+	Code          string
+	CodeExpires   time.Time
+	AuthURL       string
+	AccessExpires time.Time
 }
 
 func (s *Service) registration() (requestor, kind string, scripted bool) {
@@ -164,12 +167,15 @@ func (s *Service) registerAdobe(ctx context.Context, sess *adobeSession, stateme
 		return err
 	}
 	var token struct {
-		AccessToken string `json:"access_token"`
+		AccessToken string          `json:"access_token"`
+		ExpiresIn   json.RawMessage `json:"expires_in"`
 	}
 	if err := json.Unmarshal(tok.Body, &token); err != nil || token.AccessToken == "" {
 		return s.signInPageError(tok)
 	}
 	sess.AccessToken = token.AccessToken
+	secs, _ := jsonInt(token.ExpiresIn)
+	sess.AccessExpires = time.Now().Add(accessLifetime(secs)).UTC()
 	secrets = append(secrets, sess.AccessToken)
 
 	fp, err := randomHex(16)
@@ -418,23 +424,139 @@ func extractAuthnToken(body []byte) (string, bool) {
 	return token, true
 }
 
+// tokenExpiry reads the MVPD authentication lifetime. Adobe puts a calendar
+// time in simpleTokenExpires (a "GMT" or "_GMT" suffix is common, and the
+// element may be HTML-escaped, namespaced, attributed, or wrapped in CDATA).
+// A bare unix integer, in seconds or milliseconds, is also accepted. A
+// missing or unreadable value is the zero time. Callers must not substitute
+// a 12-hour lifetime for that: the previous substitution is what made a
+// fresh browser sign-in look like it died the same day.
 func tokenExpiry(token string) time.Time {
-	lower := strings.ToLower(token)
-	const open = "<simpletokenexpires>"
-	i := strings.Index(lower, open)
-	if i < 0 {
-		return time.Time{}
+	if t, ok := parseAdobeTime(tagText(token, "simpleTokenExpires")); ok {
+		return t
 	}
-	rest := token[i+len(open):]
-	end := strings.Index(rest, "<")
-	if end < 0 {
-		end = len(rest)
+	return time.Time{}
+}
+
+func tagText(raw, name string) string {
+	raw = unescapeToken(raw)
+	// The open and close names are the same literal. RE2 has no
+	// backreference, and a generic close tag would end the match early.
+	re := regexp.MustCompile(`(?is)<(?:[a-z0-9_.-]+:)?` + regexp.QuoteMeta(name) + `\b[^>]*>(.*?)</(?:[a-z0-9_.-]+:)?` + regexp.QuoteMeta(name) + `>`)
+	m := re.FindStringSubmatch(raw)
+	if m == nil {
+		return ""
 	}
-	n, err := strconv.ParseInt(strings.TrimSpace(rest[:end]), 10, 64)
-	if err != nil {
-		return time.Time{}
+	return cleanTagValue(m[1])
+}
+
+func unescapeToken(s string) string {
+	for i := 0; i < 3; i++ {
+		next := html.UnescapeString(s)
+		if next == s {
+			return s
+		}
+		s = next
 	}
-	return unixInt(n)
+	return s
+}
+
+func cleanTagValue(raw string) string {
+	raw = strings.TrimSpace(unescapeToken(raw))
+	lower := strings.ToLower(raw)
+	if strings.HasPrefix(lower, "<![cdata[") && strings.HasSuffix(lower, "]]>") {
+		raw = strings.TrimSpace(raw[len("<![CDATA[") : len(raw)-len("]]>")])
+	}
+	return strings.TrimSpace(raw)
+}
+
+var gmtSuffix = regexp.MustCompile(`(?i)[_ ]gmt\b`)
+
+func parseAdobeTime(v string) (time.Time, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return time.Time{}, false
+	}
+	if t, ok := parseAdobeTimeOnce(v); ok {
+		return t, true
+	}
+	stripped := strings.TrimSpace(gmtSuffix.ReplaceAllString(v, ""))
+	if stripped != v {
+		return parseAdobeTimeOnce(stripped)
+	}
+	return time.Time{}, false
+}
+
+func parseAdobeTimeOnce(v string) (time.Time, bool) {
+	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+		t := unixInt(n)
+		if t.Year() < 2000 {
+			return time.Time{}, false
+		}
+		return t, true
+	}
+	if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
+		t := unixInt(int64(f))
+		if t.Year() >= 2000 {
+			return t, true
+		}
+	}
+	layouts := []string{
+		time.RFC3339,
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05Z07:00",
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05",
+		"2006/01/02 15:04:05",
+		"2006/01/02T15:04:05",
+		"01/02/2006 15:04:05",
+		"1/2/2006 15:04:05",
+		"02 Jan 2006 15:04:05",
+		"2 Jan 2006 15:04:05",
+		"Jan 2 2006 15:04:05",
+		"January 2 2006 15:04:05",
+		time.RFC1123,
+		time.RFC1123Z,
+		"Mon Jan 2 15:04:05 MST 2006",
+		"Mon Jan 02 15:04:05 MST 2006",
+	}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, v); err == nil {
+			return t.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
+func jsonInt(raw json.RawMessage) (int64, bool) {
+	if len(raw) == 0 {
+		return 0, false
+	}
+	var n int64
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return n, true
+	}
+	var f float64
+	if err := json.Unmarshal(raw, &f); err == nil {
+		return int64(f), true
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+		return n, err == nil
+	}
+	return 0, false
+}
+
+// accessLifetime is how long an Adobe dynamic-client access token is used.
+// The token response's expires_in is seconds. A missing or absurd value
+// uses 6 hours, which is the lifetime observed for this grant. This is the
+// client credential, not the DirecTV authentication.
+func accessLifetime(seconds int64) time.Duration {
+	if seconds < 60 || seconds > 48*60*60 {
+		return 6 * time.Hour
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 func unixFlexible(raw json.RawMessage) time.Time {
