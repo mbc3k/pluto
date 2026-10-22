@@ -46,6 +46,10 @@ type tveFeeds interface {
 	SignIn() tve.SignInView
 	SubmitCode(ctx context.Context, code string) error
 	StreamStatus(sourceID, channelID string) (string, bool)
+	PollActivation(ctx context.Context)
+	BeginBrowserSignIn(ctx context.Context) error
+	ImportSession(raw string) error
+	SetNotice(msg string)
 }
 
 // Server is the HTTP server for serving playlists and EPG data.
@@ -92,6 +96,8 @@ func newServer(c *cache.Cache, tuners []Tuner, cfg *config.Config, version strin
 	mux.HandleFunc("/xmltv.xml", s.handleEPG)
 	mux.HandleFunc("/tve/directv", s.handleTVESignIn)
 	mux.HandleFunc("/tve/directv/code", s.handleTVECode)
+	mux.HandleFunc("/tve/directv/activate", s.handleTVEActivate)
+	mux.HandleFunc("/tve/directv/import", s.handleTVEImport)
 	mux.HandleFunc("/tve/", s.handleTVE)
 	if len(cfg.TVESources) > 0 {
 		s.tve = tve.NewService(cfg)
@@ -473,22 +479,105 @@ func (s *Server) handleTVESignIn(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	s.tve.PollActivation(r.Context())
 	view := s.tve.SignIn()
-	action := "/tve/directv/code"
-	if s.cfg.AccessToken != "" {
-		action += "?token=" + url.QueryEscape(s.cfg.AccessToken)
-	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	if err := signInTmpl.Execute(w, signInPage{
-		Notice:  view.Notice,
-		Prompt:  view.Prompt,
-		Signed:  view.Signed,
-		Pending: view.Pending,
-		Action:  action,
+		Notice:         view.Notice,
+		Prompt:         view.Prompt,
+		Signed:         view.Signed,
+		Pending:        view.Pending,
+		Waiting:        view.Waiting,
+		Method:         view.Method,
+		Expires:        formatTime(view.Expires),
+		ActivationURL:  view.ActivationURL,
+		Code:           view.Code,
+		Action:         s.withToken("/tve/directv/code"),
+		ActivateAction: s.withToken("/tve/directv/activate"),
+		ImportAction:   s.withToken("/tve/directv/import"),
 	}); err != nil {
 		slog.Error("render directv sign-in", "err", err)
 	}
+}
+
+func (s *Server) handleTVEActivate(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/tve/directv/activate" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.tve == nil {
+		http.NotFound(w, r)
+		return
+	}
+	// The notice on the next page is the result. The error can carry a
+	// response snippet, so it is not written here.
+	_ = s.tve.BeginBrowserSignIn(r.Context())
+	s.redirectSignIn(w, r)
+}
+
+func (s *Server) handleTVEImport(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/tve/directv/import" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.tve == nil {
+		http.NotFound(w, r)
+		return
+	}
+	raw, ok := readSignInMaterial(w, r)
+	if !ok {
+		s.tve.SetNotice("that sign-in export is too large or was not a form")
+		s.redirectSignIn(w, r)
+		return
+	}
+	_ = s.tve.ImportSession(raw)
+	s.redirectSignIn(w, r)
+}
+
+func readSignInMaterial(w http.ResponseWriter, r *http.Request) (string, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var token, extra string
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			return "", false
+		}
+		token = r.PostForm.Get("token")
+		if f, _, err := r.FormFile("cookies"); err == nil {
+			raw, err := io.ReadAll(io.LimitReader(f, 1<<20))
+			f.Close()
+			if err != nil {
+				return "", false
+			}
+			extra = string(raw)
+		}
+	} else if err := r.ParseForm(); err != nil {
+		return "", false
+	} else {
+		token = r.PostForm.Get("token")
+		extra = r.PostForm.Get("cookies")
+	}
+	raw := strings.TrimSpace(token)
+	extra = strings.TrimSpace(extra)
+	if extra == "" {
+		return raw, true
+	}
+	if raw == "" {
+		return extra, true
+	}
+	return raw + "\n" + extra, true
+}
+
+func (s *Server) redirectSignIn(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, s.withToken("/tve/directv"), http.StatusSeeOther)
 }
 
 func (s *Server) handleTVECode(w http.ResponseWriter, r *http.Request) {
@@ -512,14 +601,13 @@ func (s *Server) handleTVECode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	loc := "/tve/directv"
-	if s.cfg.AccessToken != "" {
-		loc += "?token=" + url.QueryEscape(s.cfg.AccessToken)
-	}
-	http.Redirect(w, r, loc, http.StatusSeeOther)
+	s.redirectSignIn(w, r)
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if s.tve != nil {
+		s.tve.PollActivation(r.Context())
+	}
 	updated := s.cache.LastUpdated()
 	base := publicBase(r, s.cfg.Port)
 	channels, _, _ := s.cache.GetChannels()
@@ -573,6 +661,13 @@ func (s *Server) tveStatus(base string) map[string]any {
 	if view.Pending {
 		out["prompt"] = view.Prompt
 	}
+	if view.Method != "" {
+		out["method"] = view.Method
+	}
+	if exp := formatTime(view.Expires); exp != "" {
+		out["expires"] = exp
+	}
+	out["activation"] = view.Waiting
 	for _, link := range s.tve.List() {
 		playlist := s.tveURL(base, "/tve/"+link.ID+".m3u")
 		guide := s.tveURL(base, "/tve/"+link.ID+".xml")
@@ -669,12 +764,19 @@ var signInTmpl = template.Must(template.New("directv").Parse(`<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>DirecTV sign-in</title>
   <link rel="stylesheet" href="/style.css">
+  {{if .Waiting}}<meta http-equiv="refresh" content="15">{{end}}
 </head>
 <body>
   <div class="container">
     <h1 class="logo">DirecTV</h1>
+    <p class="section-subtitle">Sign in with Safari or Firefox on this Mac. Start browser sign-in, open the activation link, and finish on DirecTV's own page. Adobe sends the browser to the network site, so this page checks the result. You can also paste an Adobe authentication token, or a Netscape or JSON cookie export that contains one. The scripted password login is only a fallback.</p>
     {{if .Notice}}<p class="banner">{{.Notice}}</p>{{end}}
-    {{if .Signed}}<p class="section-subtitle">DirecTV session is stored.</p>{{end}}
+    {{if .Signed}}<p class="section-subtitle">Stored session{{if .Method}} ({{.Method}}){{end}}{{if .Expires}}, expires {{.Expires}}{{end}}. Start browser sign-in again on this page before playback fails.</p>{{end}}
+    {{if .Waiting}}
+    <p class="section-subtitle">Activation code {{.Code}}{{if .Expires}}, expires {{.Expires}}{{end}}.</p>
+    <p class="section-subtitle"><a class="tve-link" href="{{.ActivationURL}}">Open the DirecTV activation page</a></p>
+    <p class="section-subtitle">This page checks again every 15 seconds.</p>
+    {{end}}
     {{if .Pending}}
     <p class="section-subtitle">{{.Prompt}}</p>
     <form method="post" action="{{.Action}}">
@@ -683,6 +785,16 @@ var signInTmpl = template.Must(template.New("directv").Parse(`<!DOCTYPE html>
       <button class="epg-button" type="submit">Continue</button>
     </form>
     {{end}}
+    <form method="post" action="{{.ActivateAction}}">
+      <button class="epg-button" type="submit">Start browser sign-in</button>
+    </form>
+    <form method="post" action="{{.ImportAction}}" enctype="multipart/form-data">
+      <label class="url-label" for="token">Adobe authentication token</label>
+      <textarea class="url-field" id="token" name="token" rows="6" spellcheck="false"></textarea>
+      <label class="url-label" for="cookies">Cookie export</label>
+      <input id="cookies" name="cookies" type="file">
+      <button class="epg-button" type="submit">Store session</button>
+    </form>
   </div>
 </body>
 </html>
@@ -719,11 +831,18 @@ type pageData struct {
 }
 
 type signInPage struct {
-	Notice  string
-	Prompt  string
-	Signed  bool
-	Pending bool
-	Action  string
+	Notice         string
+	Prompt         string
+	Signed         bool
+	Pending        bool
+	Waiting        bool
+	Method         string
+	Expires        string
+	ActivationURL  string
+	Code           string
+	Action         string
+	ActivateAction string
+	ImportAction   string
 }
 
 // withToken appends the shared secret as a query parameter when the gate is
@@ -771,6 +890,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		data.PlaylistURL = base + tuners[0].Path
 	}
 	if s.tve != nil {
+		s.tve.PollActivation(r.Context())
 		view := s.tve.SignIn()
 		data.TVENotice = view.Notice
 		data.TVEPrompt = view.Prompt

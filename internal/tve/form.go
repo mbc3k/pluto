@@ -2,6 +2,7 @@ package tve
 
 import (
 	"fmt"
+	"html"
 	"net/url"
 	"strings"
 )
@@ -88,12 +89,8 @@ func attr(tag, name string) string {
 }
 
 func htmlUnescape(s string) string {
-	r := strings.NewReplacer(
-		"&amp;", "&",
-		"&quot;", `"`,
-		"&#39;", "'",
-		"&lt;", "<",
-		"&gt;", ">",
-	)
-	return r.Replace(s)
+	// Adobe's SAML form encodes the next URL with numeric character
+	// references (&#x3a; for ":"). Named entities alone leave that action
+	// unusable.
+	return html.UnescapeString(s)
 }

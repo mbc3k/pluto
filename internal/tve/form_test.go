@@ -14,6 +14,14 @@ func TestHiddenFormUnescapes(t *testing.T) {
 	if fields.Get("SAMLResponse") != "saml&ok" || fields.Get("RelayState") != "st'ate" {
 		t.Fatalf("fields %v", fields)
 	}
+	numeric := `<form action="https&#x3a;&#x2f;&#x2f;idp.dtvce.com&#x2f;start" method="post"><input type="hidden" name="SAMLRequest" value="abc"></form>`
+	action, _, err = HiddenForm(numeric, "https://sp.auth.adobe.com/saml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if action != "https://idp.dtvce.com/start" {
+		t.Fatalf("numeric action %s", action)
+	}
 	if fields.Get("visible") != "" {
 		t.Fatal("visible field was included")
 	}

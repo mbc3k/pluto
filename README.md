@@ -90,7 +90,7 @@ Leave `ACCESS_TOKEN` unset and existing Channels URLs keep working. Set it when 
 - `http://host:8080/t/YOUR_SECRET/epg.xml`
 - `http://host:8080/t/YOUR_SECRET/tve/fox.m3u`
 
-These paths require the token when it is set: `/tuner-N-playlist.m3u`, `/tunerN/channels.m3u`, `/tunerN/m3u`, `/epg.xml`, `/xmltv.xml`, `/tve/{id}.m3u`, `/tve/{id}.xml`, `/tve/{source}/{channel}/stream`, `/tve/directv`, and `/tve/directv/code`. A wrong or missing token is `401` with body `unauthorized`. A `/t/` prefix that does not match is `401` even for a path that would otherwise be open, including `/health`.
+These paths require the token when it is set: `/tuner-N-playlist.m3u`, `/tunerN/channels.m3u`, `/tunerN/m3u`, `/epg.xml`, `/xmltv.xml`, `/tve/{id}.m3u`, `/tve/{id}.xml`, `/tve/{source}/{channel}/stream`, `/tve/directv`, `/tve/directv/code`, `/tve/directv/activate`, and `/tve/directv/import`. A wrong or missing token is `401` with body `unauthorized`. A `/t/` prefix that does not match is `401` even for a path that would otherwise be open, including `/health`.
 
 `/health`, `/metrics`, `/`, `/status`, and `/style.css` do not require the token. `/` and `/status` embed it in the Pluto and TV Everywhere URLs they display. Pair the token with `BIND_ADDR` so those pages are not reachable off-box. The process logs whether the gate is on, not the token. A rejected token is not copied into the error text. Every response sets `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`.
 
@@ -106,7 +106,7 @@ Tuner numbers are 1 through `TUNER_COUNT`. Only those playlist routes are regist
 | `/epg.xml`, `/xmltv.xml` | Shared XMLTV guide. |
 | `/tve/{id}.m3u`, `/tve/{id}.xml` | One TV Everywhere source, when `TVE_SOURCES` includes it. `id` `all` is the combined feed when `TVE_COMBINED` is on. `404` when the feature is off or the id is unknown. |
 | `/tve/{source}/{channel}/stream` | Local TV Everywhere stream. A channel whose playlist URL is already absolute does not use this route (`404`). |
-| `/tve/directv` | DirecTV sign-in page. `POST /tve/directv/code` continues a paused code prompt. |
+| `/tve/directv` | DirecTV sign-in page. `Cache-Control: no-store`. `POST /tve/directv/activate` starts browser sign-in. `POST /tve/directv/import` stores a pasted Adobe token or a cookie export. `POST /tve/directv/code` continues a paused scripted code prompt. |
 | `/` | HTML status page with playlist and EPG URLs, and the Channels setup steps. Any other unmatched path is `404`. |
 | `/style.css` | Stylesheet for that page. `Cache-Control: public, max-age=300`. |
 | `/health` | Readiness probe. `Cache-Control: no-store`. |
@@ -135,7 +135,7 @@ Error bodies from `http.Error` are `text/plain; charset=utf-8` and end with a ne
 
 `/` while sign-in is running says `Still signing in to Pluto TV. Playlists will start working when sign-in finishes.` After that, until the guide is cached, it says `Still loading the channel guide. Playlist and EPG links will start working after the first successful refresh.`
 
-`/status` is indented JSON. `refresh_every` is Go's duration text (`3h0m0s` for the default). `last_updated` is empty until the first successful refresh, then UTC `2006-01-02 15:04:05Z`. `access_token` is `true` or `false`. `tuners` and `epg_url` are absolute and include `?token=` when the gate is on. Other fields: `version`, `ready`, `auth_ready`, `tuner_count`, `channels`, `start_channel`, `guide_hours`, `bind_addr`. When TV Everywhere is enabled, a `tve` object lists the provider, whether DirecTV is signed in or waiting on a code, and the playlist and guide URLs. It does not include the DirecTV username, password, or session cookies.
+`/status` is indented JSON. `refresh_every` is Go's duration text (`3h0m0s` for the default). `last_updated` is empty until the first successful refresh, then UTC `2006-01-02 15:04:05Z`. `access_token` is `true` or `false`. `tuners` and `epg_url` are absolute and include `?token=` when the gate is on. Other fields: `version`, `ready`, `auth_ready`, `tuner_count`, `channels`, `start_channel`, `guide_hours`, `bind_addr`. When TV Everywhere is enabled, a `tve` object lists the provider, `signed_in`, `pending`, `activation`, `method`, `expires`, `notice`, and the playlist and guide URLs. `expires` uses the same clock text. During browser sign-in it is when the activation code expires; after a session is stored it is when that session expires. `activation` is true while a code is waiting. The object does not include the DirecTV username, password, cookies, Adobe authn token, client secret, activation URL, or regcode. Those last two are only on `/tve/directv`.
 
 Pluto playlists and the Pluto guide are gzip-encoded when `Accept-Encoding` lists `gzip` with a quality above 0. The response sets `Content-Encoding: gzip` and `Vary: Accept-Encoding`, and omits `Content-Length`. Uncompressed bodies set `Content-Length`. `Cache-Control` is `no-cache`, and `Last-Modified` is set once the guide has a timestamp. TV Everywhere responses, errors, `/health`, `/status`, `/metrics`, `/`, and `/style.css` are not gzipped.
 
@@ -155,27 +155,39 @@ Set `TVE_SOURCES` to turn the feature on. Each enabled source has its own playli
 | `TVE_START_CHANNEL` | `20000` | Integer ≥ 0. |
 | `DIRECTV_USERNAME` | empty | Trimmed. Lineups still serve when this is empty. |
 | `DIRECTV_PASSWORD` | empty | Kept as written, including spaces. Never logged and never written to the session file. |
-| `TVE_SESSION_FILE` | beside the device-id file, `pluto-tve-session.json` | Cookies and a paused sign-in. Written atomically, mode `0600`. |
+| `TVE_SESSION_FILE` | beside the device-id file, `pluto-tve-session.json` | DirecTV session: cookies, a paused ForgeRock prompt, an Adobe authn token, and a browser activation while one is in progress. Written atomically, mode `0600`. The password is not a field. |
 
 ### DirecTV sign-in
 
-On each refresh the process starts an Adobe Pass session for A+E, AMC, or Warner (requestor `HISTORY`, `AMC`, or `TNT`) and finishes DirecTV's ForgeRock login. A stored sign-in is reused for 12 hours. A failed sign-in keeps the previous guide.
+Browser sign-in is the path that works. Headless calls to `identity.directv.com` are often blocked, and Adobe's provider redirect cannot land on a local Pluto URL. Open `/tve/directv` in Safari or Firefox (add the access token when the gate is on).
 
-If DirecTV asks for a code or a menu choice, refresh pauses instead of starting another login. The status page shows the prompt. Open `/tve/directv` (with the access token, when one is set), submit the code, and the session file is updated. The code is not logged. `identity.directv.com` sits behind a CDN that may reject this client's TLS fingerprint. That has to be confirmed with a real DirecTV account.
+1. Choose **Start browser sign-in**. Pluto reads a public Adobe registration document from the History or Turner site, registers a short-lived client, and shows an activation link plus a code. The code lasts about 30 minutes. A+E uses requestor `HISTORY`. Warner, when A+E is off, uses `TNT`. Fox and Discovery use the History document. AMC alone does not publish a document this process can discover, so that button explains the miss: enable `aenetworks` or `warner`, or paste a token.
+2. Open the link and sign in to DirecTV in that browser. Adobe then sends the browser to history.com or tntdrama.com. This page reloads every 15 seconds and stores the Adobe authn token when the code completes. The method is `browser`.
+3. `/tve/directv` and `/status` show whether a session is stored, how it was stored, and when it expires. Start browser sign-in again before then. `/status` and `/` do not show the activation link or the code.
+
+The other handoff is a paste. Put an Adobe authn token in the box, or upload a Netscape `cookies.txt` or a JSON cookie export that contains one. The next page says whether it was stored. The method is `token`. DirecTV website cookies that do not carry an authn token are rejected: this process cannot replay them through the identity provider. A token with no expiry, or one that has already expired, is rejected and is not written to the session file.
+
+Scripted login remains a fallback. On refresh, when `DIRECTV_USERNAME` and `DIRECTV_PASSWORD` are both set, A+E or Warner is enabled, no browser activation is waiting, and the stored session is missing or within an hour of expiry, the process fetches the same Adobe sign-in form and continues DirecTV's ForgeRock login. The method is `scripted`. If DirecTV asks for a code or a menu choice, refresh pauses. Submit it at `POST /tve/directv/code`. The code is not logged. `identity.directv.com` often answers 403 to this client, which is why the browser path is first.
+
+A session with an expiry is reused until it is within an hour of that time. An older file with no expiry is reused for 12 hours after it was written. A failed sign-in keeps the previous guide. The session file is mode `0600`. It can hold the authn token and, while a browser sign-in is in progress, the Adobe client id, client secret, and regcode. None of those are logged.
+
+An older build logged `directv sign-in page failed` with HTTP 405 because it sent GET to Adobe's POST-only session collection. That request is no longer made.
 
 ### What each source does
 
 | Source | Playlist | Guide | Streams |
 |---|---|---|---|
 | `aenetworks` | History, A&E, Lifetime, FYI | Two days of the public schedule, plus a now-playing row when it does not overlap | Public Google DAI HLS URLs |
-| `amcn` | AMC, BBC America, IFC, WE tv | Channel list only | Local URL that answers 503 until a DirecTV media token is verified |
-| `warner` | TNT, TBS, truTV, and TCM, east and west | Turner schedule widget for TNT, TBS, and truTV. TCM's guide is a separate call and is left empty | Local 503, same reason |
-| `fox` | News, Business, Weather, and the sports channels | Channel list only | News, Business, and Weather use public HLS. Sports channels answer 503 |
-| `discovery` | TLC, Food, Discovery, HGTV, ID, Animal Planet, OWN, Travel, Cooking, Magnolia | Channel list only | Local 503. Discovery signs in on its own site, not through the shared DirecTV Adobe flow |
+| `amcn` | AMC, BBC America, IFC, WE tv | Two days from each network's public schedule page | Local URL that answers 503 until a DirecTV media token is verified |
+| `warner` | TNT, TBS, truTV, and TCM, east and west | Turner schedule widget for TNT, TBS, and truTV (the HTML page's schedule blob). TCM uses the public listings query | Local 503, same reason |
+| `fox` | News, Business, Weather, and the sports channels | News and Business JSON feeds, plus the public sports listings. Weather has no public schedule and stays empty | News, Business, and Weather use public HLS. Sports channels answer 503 |
+| `discovery` | TLC, Food, Discovery, HGTV, ID, Animal Planet, OWN, Travel, Cooking, Magnolia | Anonymous listings from the Discovery playback service. Catalog ids that differ from the site slug are mapped | Local 503. Discovery playback signs in on its own site |
 
 These sources were not implemented: NBCUniversal (Widevine), FOX One, Disney (phone activation), CNN, C-SPAN, Versant (USA, E!, Syfy, and the rest of that family), Univision, Tennis Channel, DAZN, YES, MSG, and Sundance. Xfinity, Cox, and Spectrum need a browser session, and YouTube TV needs a Google master token. None of those match a DirecTV login that this process can finish on its own.
 
-Streams that still need a live check with real DirecTV credentials: the Adobe session itself (including a one-time code), A+E guide and DAI playback, AMC and Warner media-token playback, TCM guide data, Fox sports, and Discovery playback.
+A guide response that is not JSON is logged with the source, HTTP status, content type, and a short body snippet. A source that produces zero programmes is logged too, and the previous programmes for that channel are kept.
+
+Streams that still need a live check with real DirecTV credentials: A+E DAI playback, AMC and Warner media-token playback, Fox sports playback, and Discovery playback. The guides above are public and do not use the DirecTV password.
 
 ## Channels DVR
 
@@ -257,7 +269,7 @@ svcadm enable svc:/network/pluto:default
 
 - Set `BIND_ADDR` to loopback or the DVR's LAN address when the host has another route in.
 - Treat `ACCESS_TOKEN` like a password. It will appear in Channels' source URL, in `/` and `/status`, and in proxy access logs. It is not written to this process's log.
-- Keep `pluto.conf` mode `0600`. `PLUTO_PASSWORD`, `DIRECTV_PASSWORD`, and boot errors are redacted in logs. The DirecTV session file is mode `0600` and does not store the password.
+- Keep `pluto.conf` mode `0600`. `PLUTO_PASSWORD`, `DIRECTV_PASSWORD`, and boot errors are redacted in logs. The DirecTV session file is mode `0600` and does not store the password. It does store the Adobe authn token and, during browser sign-in, the client secret and regcode. Those values are not written to the log, `/status`, or `/`.
 - Device IDs are not secret account passwords, but the file is mode `0600` and should stay on the volume you back up. Deleting it makes Pluto TV treat the tuners as new devices.
 - The listener is plain HTTP. Terminate TLS in front of it if the link is not trusted, and send `X-Forwarded-Proto: https` if the status page should show `https` URLs.
 - `/metrics` has no token. Do not publish it on an open port. It does not contain the secret or account password.
@@ -272,6 +284,11 @@ svcadm enable svc:/network/pluto:default
 | `401 unauthorized` | The gate is on and this URL has no matching token. Copy the URL from `/`. A wrong `/t/...` prefix returns 401 for `/health` too. The same token covers `/tve/...`. |
 | `/tve/...` is `404` | `TVE_SOURCES` is empty, or the source id is not one of the five names above. `/tve/all.m3u` is also `404` when `TVE_COMBINED` is false. |
 | A TV Everywhere stream is `503` | That channel has no public URL. Playback still needs a live DirecTV check. The body does not include the password. |
+| `directv sign-in page failed` with status 405 | An old build sent GET to Adobe's POST-only session collection. Use browser sign-in on `/tve/directv`. |
+| DirecTV sign-in page was not available | The scripted fallback did not get a provider form. The log has the HTTP status, content type, and a short snippet. Sign in with Safari or Firefox on `/tve/directv`. |
+| `tve guide response was not json` | That guide URL returned HTML or another non-JSON body. The log includes the source, status, content type, and a short snippet. Previous programmes stay. |
+| `tve guide returned zero programmes` | The new fetch had no programmes. Fox Weather does this because it has no public schedule. Previous programmes stay. |
+| `invalid character '<'` looking for JSON | An old build parsed the Turner schedule page as JSON. That page is HTML. Update. |
 | Guide works, streams fail later | Stream URLs carry a Pluto JWT. It is refreshed when it is within 1 hour of expiry or when it was issued more than 2 hours ago. Handing out a playlist does not extend that age. A stitcher `401` is not retried by the HTTP client. The next playlist request signs in again. |
 | New device on every restart | `DEVICE_ID_FILE` is not on a persistent volume. In the container image that path is `/data/pluto-devices.conf`. |
 | `GUIDE_HOURS` in `/status` is higher than you set | It was rounded up to a multiple of 6, and capped at 72. The log line is `GUIDE_HOURS rounded up to a multiple of 6`. |

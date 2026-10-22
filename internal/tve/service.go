@@ -3,6 +3,7 @@ package tve
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -24,28 +25,38 @@ type Link struct {
 }
 
 // SignInView is what the status page and the code form are allowed to show.
+// ActivationURL and Code are only for the sign-in page. The status JSON
+// does not include them.
 type SignInView struct {
-	Signed  bool
-	Pending bool
-	Prompt  string
-	Notice  string
+	Signed        bool
+	Pending       bool
+	Waiting       bool
+	Prompt        string
+	Notice        string
+	Method        string
+	Expires       time.Time
+	ActivationURL string
+	Code          string
 }
 
 // Service refreshes enabled TV Everywhere sources and remembers a DirecTV
 // session. A failed refresh keeps the previous guide.
 type Service struct {
-	sources     []string
-	combined    bool
-	start       int
-	user        string
-	password    string
-	sessionPath string
-	every       time.Duration
-	client      *http.Client
-	adobeBase   string
-	endpoints   Endpoints
+	sources             []string
+	combined            bool
+	start               int
+	user                string
+	password            string
+	sessionPath         string
+	every               time.Duration
+	client              *http.Client
+	adobeBase           string
+	historyStatementURL string
+	turnerStatementURL  string
+	endpoints           Endpoints
 
 	mu     sync.Mutex
+	signMu sync.Mutex
 	feeds  map[string]source.Feed
 	signIn SignInView
 }
@@ -101,11 +112,14 @@ func (s *Service) refresh(ctx context.Context) {
 	s.trySignIn(ctx)
 	for _, id := range s.sources {
 		channels := cloneChannels(id)
-		s.keepGuides(id, channels)
-		if err := s.fillGuide(ctx, id, channels); err != nil {
-			slog.Error("tve guide refresh failed", "source", id, "err", redact(err.Error(), s.password, s.user))
-			s.keepGuides(id, channels)
+		err := s.fillGuide(ctx, id, channels)
+		if programmeCount(channels) == 0 {
+			slog.Warn("tve guide returned zero programmes", "source", id)
 		}
+		if err != nil {
+			slog.Error("tve guide refresh failed", "source", id, "err", redact(err.Error(), s.password, s.user))
+		}
+		s.keepGuides(id, channels)
 		s.mu.Lock()
 		s.feeds[id] = source.Feed{ID: id, Name: DisplayName(id), Channels: channels, Updated: time.Now().UTC()}
 		s.mu.Unlock()
@@ -167,6 +181,8 @@ func (s *Service) SubmitCode(ctx context.Context, code string) error {
 	if code == "" {
 		return fmt.Errorf("a code is required")
 	}
+	s.signMu.Lock()
+	defer s.signMu.Unlock()
 	st, err := loadState(s.sessionPath)
 	if err != nil {
 		return err
@@ -267,17 +283,6 @@ func (s *Service) keepGuides(id string, channels []source.Channel) {
 	}
 }
 
-func (s *Service) fillGuide(ctx context.Context, id string, channels []source.Channel) error {
-	switch id {
-	case SourceAE:
-		return s.fillAE(ctx, channels)
-	case SourceWarner:
-		return s.fillWarner(ctx, channels)
-	default:
-		return nil
-	}
-}
-
 func (s *Service) fillAE(ctx context.Context, channels []source.Channel) error {
 	loc, err := time.LoadLocation("America/New_York")
 	if err != nil {
@@ -294,14 +299,17 @@ func (s *Service) fillAE(ctx context.Context, channels []source.Channel) error {
 		for day := 0; day < 2; day++ {
 			d := today.AddDate(0, 0, day)
 			u := fmt.Sprintf("%s/%d/%d/%d/ET", prefix, d.Month(), d.Day(), d.Year())
-			body, err := s.get(ctx, u)
+			body, err := s.getGuide(ctx, SourceAE, u, nil)
 			if err != nil {
 				if first == nil {
 					first = err
 				}
 				continue
 			}
-			part, err := ParseAESchedule(channels[i].ID, body)
+			part, err := ParseAESchedule(channels[i].ID, body.Body)
+			if err != nil {
+				err = s.noteNonJSON(SourceAE, body, err)
+			}
 			if err != nil {
 				if first == nil {
 					first = err
@@ -318,10 +326,7 @@ func (s *Service) fillAE(ctx context.Context, channels []source.Channel) error {
 			channels[i].Programs = programs
 		}
 	}
-	if len(channels) > 0 && first != nil && len(channels[0].Programs) == 0 {
-		return first
-	}
-	return nil
+	return first
 }
 
 func (s *Service) aeNow(ctx context.Context, id string) (source.Program, bool) {
@@ -347,9 +352,22 @@ func (s *Service) aeNow(ctx context.Context, id string) (source.Program, bool) {
 }
 
 func (s *Service) fillWarner(ctx context.Context, channels []source.Channel) error {
-	cache := map[string][]byte{}
+	cache := map[string]fetched{}
 	var first error
 	for i := range channels {
+		if channels[i].ID == "tcm-east" || channels[i].ID == "tcm-west" {
+			programs, err := s.tcmGuide(ctx, channels[i].ID)
+			if err != nil {
+				if first == nil {
+					first = err
+				}
+				continue
+			}
+			if len(programs) > 0 {
+				channels[i].Programs = programs
+			}
+			continue
+		}
 		network := warnerNetwork[channels[i].ID]
 		if network == "" {
 			continue
@@ -357,7 +375,7 @@ func (s *Service) fillWarner(ctx context.Context, channels []source.Channel) err
 		body, ok := cache[network]
 		if !ok {
 			var err error
-			body, err = s.get(ctx, "https://tnets-dvs-schedule.wme-digital.com/?network="+network)
+			body, err = s.getGuide(ctx, SourceWarner, warnerWidgetURL+"?network="+network, map[string]string{"Accept": "text/html,application/json;q=0.9,*/*;q=0.8"})
 			if err != nil {
 				if first == nil {
 					first = err
@@ -366,8 +384,9 @@ func (s *Service) fillWarner(ctx context.Context, channels []source.Channel) err
 			}
 			cache[network] = body
 		}
-		programs, err := ParseWarnerWidget(channels[i].ID, body)
+		programs, err := ParseWarnerWidget(channels[i].ID, body.Body)
 		if err != nil {
+			err = s.noteNonJSON(SourceWarner, body, err)
 			if first == nil {
 				first = err
 			}
@@ -380,24 +399,104 @@ func (s *Service) fillWarner(ctx context.Context, channels []source.Channel) err
 	return first
 }
 
-func (s *Service) get(ctx context.Context, rawURL string) ([]byte, error) {
+type fetched struct {
+	Status      int
+	ContentType string
+	Body        []byte
+	Header      http.Header
+	URL         string
+}
+
+func (s *Service) http() *http.Client {
+	if s.client != nil {
+		return s.client
+	}
+	return newBrowserClient()
+}
+
+func (s *Service) fetch(ctx context.Context, rawURL string, headers map[string]string) (fetched, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, err
+		return fetched{}, err
 	}
-	req.Header.Set("Accept", "application/json,*/*")
+	req.Header.Set("Accept", "text/html,application/json;q=0.9,*/*;q=0.8")
 	req.Header.Set("User-Agent", browserUA)
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	resp, err := s.client.Do(req)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := s.http().Do(req)
 	if err != nil {
-		return nil, err
+		return fetched{}, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("guide HTTP %d", resp.StatusCode)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	got := fetched{
+		Status:      resp.StatusCode,
+		ContentType: resp.Header.Get("Content-Type"),
+		Body:        body,
+		Header:      resp.Header.Clone(),
+		URL:         rawURL,
 	}
-	return body, nil
+	if resp.Request != nil && resp.Request.URL != nil {
+		got.URL = resp.Request.URL.String()
+	}
+	return got, nil
+}
+
+func (s *Service) getGuide(ctx context.Context, sourceID, rawURL string, headers map[string]string) (fetched, error) {
+	got, err := s.fetch(ctx, rawURL, headers)
+	if err != nil {
+		return got, err
+	}
+	if got.Status == http.StatusOK {
+		return got, nil
+	}
+	return got, s.badGuide(sourceID, got, fmt.Errorf("guide HTTP %d", got.Status))
+}
+
+func (s *Service) noteNonJSON(sourceID string, got fetched, err error) error {
+	if err == nil || looksJSON(got.Body) {
+		return err
+	}
+	return s.badGuide(sourceID, got, err)
+}
+
+func (s *Service) badGuide(sourceID string, got fetched, err error) error {
+	ct := got.ContentType
+	if ct == "" {
+		ct = "unknown"
+	}
+	snip := snippet(got.Body, s.password, s.user)
+	if !looksJSON(got.Body) {
+		slog.Error("tve guide response was not json", "source", sourceID, "status", got.Status, "content_type", ct, "body", snip)
+	}
+	return fmt.Errorf("%v (HTTP %d, content-type %s, body %q)", err, got.Status, ct, snip)
+}
+
+func looksJSON(body []byte) bool {
+	b := bytes.TrimSpace(body)
+	if len(b) == 0 || (b[0] != '{' && b[0] != '[') {
+		return false
+	}
+	return json.Valid(b)
+}
+
+func snippet(body []byte, secrets ...string) string {
+	if len(body) > 512 {
+		body = body[:512]
+	}
+	s := strings.Map(func(r rune) rune {
+		if r < 32 {
+			return ' '
+		}
+		return r
+	}, string(body))
+	s = strings.Join(strings.Fields(s), " ")
+	runes := []rune(s)
+	if len(runes) > 160 {
+		s = string(runes[:160])
+	}
+	return redact(s, secrets...)
 }
 
 func coversNow(programs []source.Program, start time.Time) bool {
@@ -413,66 +512,243 @@ func coversNow(programs []source.Program, start time.Time) bool {
 }
 
 func (s *Service) trySignIn(ctx context.Context) {
-	if s.user == "" || s.password == "" {
-		s.setSignIn(SignInView{Notice: "DirecTV username and password are not set. Lineups are still served; streams that need a media token stay unavailable."})
+	s.signMu.Lock()
+	defer s.signMu.Unlock()
+	s.trySignInLocked(ctx)
+}
+
+// PollActivation checks a browser sign-in that is already in the session
+// file. It does not start a scripted login.
+func (s *Service) PollActivation(ctx context.Context) {
+	s.signMu.Lock()
+	defer s.signMu.Unlock()
+	st, err := loadState(s.sessionPath)
+	if err != nil || st.Activation == nil {
 		return
 	}
+	s.pollActivationLocked(ctx, st)
+}
+
+// BeginBrowserSignIn registers an Adobe device code and stores the link a
+// person opens in Safari or Firefox. Adobe's redirect returns to the
+// network's site. Pluto learns the result by polling the regcode.
+func (s *Service) BeginBrowserSignIn(ctx context.Context) error {
+	s.signMu.Lock()
+	defer s.signMu.Unlock()
+	sess, err := s.openAdobe(ctx)
+	if err != nil {
+		s.setNotice("DirecTV browser sign-in did not start. " + redact(err.Error(), s.password, s.user))
+		return err
+	}
+	st := State{Activation: &Activation{
+		Code:         sess.Code,
+		URL:          sess.AuthURL,
+		Requestor:    sess.Requestor,
+		Expires:      sess.CodeExpires,
+		ClientID:     sess.ClientID,
+		ClientSecret: sess.ClientSecret,
+		AccessToken:  sess.AccessToken,
+		DeviceID:     sess.DeviceID,
+		Fingerprint:  sess.Fingerprint,
+		PassSFP:      sess.PassSFP,
+	}}
+	if err := saveState(s.sessionPath, st); err != nil {
+		s.setNotice("DirecTV browser sign-in started but the session file was not saved.")
+		return err
+	}
+	s.applyState(st)
+	return nil
+}
+
+// ImportSession stores a pasted Adobe authn token, or one found in a
+// Netscape or JSON cookie export. The result is on the sign-in view.
+func (s *Service) ImportSession(raw string) error {
+	s.signMu.Lock()
+	defer s.signMu.Unlock()
+	token, exp, err := sessionMaterial(raw)
+	if err != nil {
+		s.setNotice(err.Error())
+		return err
+	}
+	requestor, _, _ := s.registration()
+	st := State{
+		Signed:     true,
+		Method:     "token",
+		Expires:    exp,
+		AuthnToken: token,
+		Requestor:  requestor,
+	}
+	if err := saveState(s.sessionPath, st); err != nil {
+		s.setNotice("The Adobe token was valid but the session file was not saved.")
+		return err
+	}
+	s.applyState(st)
+	return nil
+}
+
+// SetNotice replaces the operator-facing message and leaves the stored
+// session alone. The text must already be safe to show.
+func (s *Service) SetNotice(msg string) {
+	s.signMu.Lock()
+	defer s.signMu.Unlock()
+	s.setNotice(msg)
+}
+
+func (s *Service) setNotice(msg string) {
+	s.mu.Lock()
+	v := s.signIn
+	v.Notice = msg
+	s.signIn = v
+	s.mu.Unlock()
+}
+
+func (s *Service) trySignInLocked(ctx context.Context) {
 	st, err := loadState(s.sessionPath)
 	if err != nil {
 		slog.Warn("tve session", "err", err)
 		st = State{}
 	}
+	if st.Activation != nil {
+		s.pollActivationLocked(ctx, st)
+		return
+	}
 	if st.Pending != nil {
 		s.applyState(st)
 		return
 	}
-	if st.Signed && time.Since(st.Updated) < 12*time.Hour {
+	if sessionFresh(st) {
 		s.applyState(st)
 		return
 	}
-	requestor := ""
-	for _, id := range s.sources {
-		if requestor = adobeRequestor(id); requestor != "" {
-			break
-		}
-	}
-	if requestor == "" {
-		s.setSignIn(SignInView{Notice: "None of the enabled sources start a DirecTV sign-in. Public stream URLs are served as-is."})
+	_, _, scripted := s.registration()
+	if s.user == "" || s.password == "" {
+		s.setSignIn(SignInView{Notice: "DirecTV username and password are not set. Lineups are still served; streams that need a media token stay unavailable. Use the DirecTV sign-in page in Safari or Firefox to store a session."})
 		return
 	}
-	pageURL := strings.TrimRight(s.adobeBase, "/") + "/api/v2/" + requestor + "/sessions?mso_id=DTV"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
-	if err != nil {
+	if !scripted {
+		s.setSignIn(SignInView{Notice: "None of the enabled sources start a scripted DirecTV sign-in. Public stream URLs are served as-is. Browser sign-in is on the DirecTV page."})
 		return
 	}
-	req.Header.Set("Accept", "text/html")
-	req.Header.Set("User-Agent", browserUA)
-	resp, err := s.client.Do(req)
+	html, finalURL, sess, err := s.fetchSignInPage(ctx)
 	if err != nil {
 		slog.Error("directv sign-in did not start", "err", redact(err.Error(), s.password, s.user))
-		s.setSignIn(SignInView{Notice: "DirecTV sign-in did not start. The previous session, if any, is unchanged."})
+		s.setSignIn(SignInView{Notice: "DirecTV sign-in page was not available. The log has the HTTP status, content type, and a short response snippet. Use Safari or Firefox on the DirecTV sign-in page. Lineups stay up."})
 		return
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	finalURL := pageURL
-	if resp.Request != nil && resp.Request.URL != nil {
-		finalURL = resp.Request.URL.String()
-	}
-	if resp.StatusCode >= 400 {
-		slog.Error("directv sign-in page failed", "status", resp.StatusCode)
-		s.setSignIn(SignInView{Notice: "DirecTV sign-in page was not available. Lineups stay up."})
-		return
-	}
-	out, err := Login(ctx, s.client, s.endpoints, string(body), finalURL, s.user, s.password)
+	out, err := Login(ctx, s.http(), s.endpoints, html, finalURL, s.user, s.password)
 	if err != nil {
 		slog.Error("directv sign-in failed", "err", redact(err.Error(), s.password, s.user))
-		s.setSignIn(SignInView{Notice: "DirecTV sign-in failed. Check the log for the status code, then try again on the next refresh."})
+		s.setSignIn(SignInView{Notice: "DirecTV sign-in failed. The log has the HTTP status. identity.directv.com often blocks this process. Use Safari or Firefox on the DirecTV sign-in page. Lineups stay up."})
 		return
 	}
-	if err := s.storeOutcome(out, s.client); err != nil {
+	if err := s.storeOutcome(out, s.http()); err != nil {
 		slog.Error("tve session was not saved", "err", redact(err.Error(), s.password, s.user))
+		return
 	}
+	if sess == nil || out == nil || out.Pending != nil {
+		return
+	}
+	token, pending, err := s.pollAdobe(ctx, sess)
+	if err != nil || pending || token == "" {
+		return
+	}
+	saved, err := loadState(s.sessionPath)
+	if err != nil {
+		return
+	}
+	saved.AuthnToken = token
+	saved.Method = "scripted"
+	saved.Requestor = sess.Requestor
+	if exp := tokenExpiry(token); !exp.IsZero() {
+		saved.Expires = exp
+	}
+	if err := saveState(s.sessionPath, saved); err != nil {
+		slog.Error("tve session was not saved", "err", redact(err.Error(), s.password, s.user))
+		return
+	}
+	s.applyState(saved)
+}
+
+func (s *Service) pollActivationLocked(ctx context.Context, st State) {
+	if st.Activation == nil {
+		return
+	}
+	if !st.Activation.Expires.IsZero() && time.Now().After(st.Activation.Expires) {
+		st.Activation = nil
+		if err := saveState(s.sessionPath, st); err != nil {
+			slog.Error("tve session was not saved", "err", err)
+		}
+		s.setSignIn(SignInView{Notice: "That DirecTV activation code expired. Start browser sign-in again. Safari or Firefox can finish the provider page."})
+		return
+	}
+	sess := &adobeSession{
+		Requestor:    st.Activation.Requestor,
+		ClientID:     st.Activation.ClientID,
+		ClientSecret: st.Activation.ClientSecret,
+		AccessToken:  st.Activation.AccessToken,
+		DeviceID:     st.Activation.DeviceID,
+		Fingerprint:  st.Activation.Fingerprint,
+		PassSFP:      st.Activation.PassSFP,
+		Code:         st.Activation.Code,
+		CodeExpires:  st.Activation.Expires,
+		AuthURL:      st.Activation.URL,
+	}
+	token, pending, err := s.pollAdobe(ctx, sess)
+	if pending {
+		s.applyState(st)
+		return
+	}
+	if err != nil || token == "" {
+		if err != nil {
+			slog.Error("directv activation poll failed", "err", redact(err.Error(), s.password, s.user, st.Activation.AccessToken, st.Activation.ClientSecret, st.Activation.Code))
+		}
+		s.applyState(st)
+		view := s.SignIn()
+		view.Notice = "DirecTV has not confirmed the browser sign-in yet. The log has the HTTP status, content type, and a short response snippet when Adobe returned an error. Leave this page open, or start again if the code expired."
+		s.setSignIn(view)
+		return
+	}
+	st.Signed = true
+	st.Method = "browser"
+	st.AuthnToken = token
+	st.Requestor = st.Activation.Requestor
+	st.Expires = tokenExpiry(token)
+	if st.Expires.IsZero() {
+		st.Expires = time.Now().Add(12 * time.Hour).UTC()
+	}
+	st.Activation = nil
+	st.Pending = nil
+	if err := saveState(s.sessionPath, st); err != nil {
+		slog.Error("tve session was not saved", "err", redact(err.Error(), s.password, s.user, token))
+		return
+	}
+	s.applyState(st)
+}
+
+func sessionFresh(st State) bool {
+	if !st.Signed {
+		return false
+	}
+	if !st.Expires.IsZero() {
+		return time.Until(st.Expires) > time.Hour
+	}
+	return !st.Updated.IsZero() && time.Since(st.Updated) < 12*time.Hour
+}
+
+func signedNotice(st State) string {
+	how := "DirecTV session is stored"
+	switch st.Method {
+	case "browser":
+		how = "DirecTV session from Safari or Firefox is stored"
+	case "token":
+		how = "Pasted Adobe authentication token is stored"
+	case "scripted":
+		how = "Scripted DirecTV session is stored"
+	}
+	if st.Expires.IsZero() {
+		return how + ". Sign in again from the DirecTV page if playback starts failing. The scripted password login is only a fallback."
+	}
+	return fmt.Sprintf("%s. It expires %s. Open the DirecTV sign-in page and start browser sign-in again before then. The scripted password login is only a fallback.", how, clock(st.Expires))
 }
 
 func (s *Service) storeOutcome(out *Outcome, client *http.Client) error {
@@ -483,6 +759,8 @@ func (s *Service) storeOutcome(out *Outcome, client *http.Client) error {
 		return saveState(s.sessionPath, st)
 	}
 	st.Signed = true
+	st.Method = "scripted"
+	st.Expires = time.Now().Add(12 * time.Hour).UTC()
 	if out != nil {
 		st.FinalURL = out.FinalURL
 	}
@@ -492,14 +770,22 @@ func (s *Service) storeOutcome(out *Outcome, client *http.Client) error {
 }
 
 func (s *Service) applyState(st State) {
-	view := SignInView{Signed: st.Signed}
-	if st.Pending != nil {
+	view := SignInView{Signed: st.Signed, Method: st.Method, Expires: st.Expires}
+	switch {
+	case st.Activation != nil:
+		view.Waiting = true
+		view.Signed = false
+		view.ActivationURL = st.Activation.URL
+		view.Code = st.Activation.Code
+		view.Expires = st.Activation.Expires
+		view.Notice = "Open the activation link in Safari or Firefox and sign in to DirecTV there. Adobe sends the browser back to the network's own site, not to Pluto. This page checks for the finished sign-in on its own. Start again if the code expires."
+	case st.Pending != nil:
 		view.Pending = true
 		view.Signed = false
 		view.Prompt = st.Pending.Prompt
-		view.Notice = "DirecTV needs another step. Open the sign-in page and submit the code or menu choice."
-	} else if st.Signed {
-		view.Notice = "DirecTV sign-in is stored. Network playback that needs a media token still has to be checked with a real account."
+		view.Notice = "DirecTV needs another step. Submit the code or menu choice. A browser sign-in in Safari or Firefox does not use this prompt."
+	case st.Signed:
+		view.Notice = signedNotice(st)
 	}
 	s.setSignIn(view)
 }
