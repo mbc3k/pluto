@@ -81,7 +81,7 @@ func TestTVERoutesGateAndFeeds(t *testing.T) {
 	}
 
 	rr := do(s, http.MethodGet, "/tve/fox.m3u?token="+token, nil)
-	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "https://247.foxnews.com/") || !strings.Contains(rr.Body.String(), "tvg-chno=20000") {
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "/tve/fox/fox_news/stream") || !strings.Contains(rr.Body.String(), "tvg-chno=20000") {
 		t.Fatalf("fox playlist %d\n%s", rr.Code, rr.Body.String())
 	}
 	if !strings.Contains(rr.Body.String(), "http://example.com/t/"+token+"/tve/fox/fox_sports_fs1/stream") {
@@ -108,8 +108,8 @@ func TestTVERoutesGateAndFeeds(t *testing.T) {
 	if rr.Code != http.StatusServiceUnavailable || !strings.Contains(rr.Body.String(), "DirecTV") || strings.Contains(rr.Body.String(), pass) {
 		t.Fatalf("stream %d %q", rr.Code, rr.Body.String())
 	}
-	if rr := do(s, http.MethodGet, "/tve/fox/fox_news/stream?token="+token, nil); rr.Code != http.StatusNotFound {
-		t.Fatalf("public stream route %d", rr.Code)
+	if rr := do(s, http.MethodGet, "/tve/fox/fox_news/stream?token="+token, nil); rr.Code != http.StatusServiceUnavailable || !strings.Contains(rr.Body.String(), "directv sign-in") || strings.Contains(rr.Body.String(), pass) {
+		t.Fatalf("fox news stream %d %q", rr.Code, rr.Body.String())
 	}
 
 	rr = do(s, http.MethodGet, "/tve/directv?token="+token, nil)
@@ -319,8 +319,8 @@ func (f *fakeFeeds) SignIn() tve.SignInView {
 	return v
 }
 func (f *fakeFeeds) SubmitCode(context.Context, string) error { return nil }
-func (f *fakeFeeds) StreamStatus(string, string) (string, bool) {
-	return "", false
+func (f *fakeFeeds) OpenStream(context.Context, string, string) (tve.StreamTarget, error) {
+	return tve.StreamTarget{}, tve.ErrUnknownStream
 }
 func (f *fakeFeeds) PollActivation(context.Context) { f.polled++ }
 func (f *fakeFeeds) BeginBrowserSignIn(context.Context) error {

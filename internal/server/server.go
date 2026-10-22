@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -45,7 +46,7 @@ type tveFeeds interface {
 	Guide(id string) ([]byte, time.Time, bool)
 	SignIn() tve.SignInView
 	SubmitCode(ctx context.Context, code string) error
-	StreamStatus(sourceID, channelID string) (string, bool)
+	OpenStream(ctx context.Context, sourceID, channelID string) (tve.StreamTarget, error)
 	PollActivation(ctx context.Context)
 	BeginBrowserSignIn(ctx context.Context) error
 	ImportSession(raw string) error
@@ -454,13 +455,32 @@ func (s *Server) handleTVE(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		msg, ok := s.tve.StreamStatus(parts[0], parts[1])
-		if !ok {
+		target, err := s.tve.OpenStream(r.Context(), parts[0], parts[1])
+		if errors.Is(err, tve.ErrUnknownStream) {
 			http.NotFound(w, r)
 			return
 		}
 		w.Header().Set("Cache-Control", "no-store")
-		http.Error(w, msg, http.StatusServiceUnavailable)
+		if err != nil {
+			status := http.StatusServiceUnavailable
+			var pe *tve.PlayError
+			if errors.As(err, &pe) && pe.Status != 0 {
+				status = pe.Status
+			}
+			http.Error(w, err.Error(), status)
+			return
+		}
+		if len(target.Body) > 0 {
+			w.Header().Set("Content-Type", "application/x-mpegurl")
+			w.Header().Set("Content-Length", strconv.Itoa(len(target.Body)))
+			_, _ = w.Write(target.Body)
+			return
+		}
+		if target.Redirect == "" {
+			http.Error(w, "playback: no stream URL", http.StatusBadGateway)
+			return
+		}
+		http.Redirect(w, r, target.Redirect, http.StatusFound)
 	default:
 		http.NotFound(w, r)
 	}

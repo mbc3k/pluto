@@ -2,6 +2,7 @@ package tve
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -131,17 +132,20 @@ func TestLineupWithoutCredentials(t *testing.T) {
 	if !ok {
 		t.Fatal("missing combined playlist")
 	}
-	if !strings.Contains(pl, "https://247.foxnews.com/hls/live/2003586/FNCHLSv3/master.m3u8") {
-		t.Fatalf("missing public fox news url:\n%s", pl)
+	if !strings.Contains(pl, "http://h/tve/fox/fox_news/stream") {
+		t.Fatalf("missing fox news stream route:\n%s", pl)
 	}
 	if !strings.Contains(pl, "http://h/tve/fox/fox_sports_fs1/stream") {
 		t.Fatalf("missing local sports url:\n%s", pl)
 	}
-	msg, ok := svc.StreamStatus(SourceFox, "fox_sports_fs1")
-	if !ok || !strings.Contains(msg, "DirecTV") {
-		t.Fatalf("stream status %v %q", ok, msg)
+	if !strings.Contains(pl, "https://content.uplynk.com/") {
+		t.Fatalf("fox weather should stay a public manifest:\n%s", pl)
 	}
-	if _, ok := svc.StreamStatus(SourceFox, "fox_news"); ok {
+	_, err := svc.OpenStream(context.Background(), SourceFox, "fox_sports_fs1")
+	if err == nil || !strings.Contains(err.Error(), "DirecTV") {
+		t.Fatalf("stream status %v", err)
+	}
+	if _, err := svc.OpenStream(context.Background(), SourceFox, "fox_weather"); !errors.Is(err, ErrUnknownStream) {
 		t.Fatal("a public manifest should not be answered by the local stream route")
 	}
 	xml, _, ok := svc.Guide(SourceDiscovery)
