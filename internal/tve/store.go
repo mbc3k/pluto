@@ -9,19 +9,29 @@ import (
 )
 
 // State is the on-disk DirecTV session. The password is never stored.
-// AuthnToken and Activation hold Adobe session material. The file is mode
-// 0600. Those values are not written to logs or the status page.
+// AuthnToken is the long-lived MVPD authentication. ClientID, ClientSecret,
+// AccessToken, and DeviceID are the Adobe client that authentication is
+// bound to; they stay in this file so the access token can be refreshed
+// without another browser sign-in. The file is mode 0600. None of those
+// values are written to logs or the status page.
 type State struct {
-	Updated    time.Time      `json:"updated"`
-	Signed     bool           `json:"signed_in"`
-	Expires    time.Time      `json:"expires,omitempty"`
-	Method     string         `json:"method,omitempty"`
-	Requestor  string         `json:"requestor,omitempty"`
-	AuthnToken string         `json:"authn_token,omitempty"`
-	Pending    *Pending       `json:"pending,omitempty"`
-	Activation *Activation    `json:"activation,omitempty"`
-	Cookies    []StoredCookie `json:"cookies,omitempty"`
-	FinalURL   string         `json:"final_url,omitempty"`
+	Updated       time.Time      `json:"updated"`
+	Signed        bool           `json:"signed_in"`
+	Expires       time.Time      `json:"expires,omitempty"`
+	Method        string         `json:"method,omitempty"`
+	Requestor     string         `json:"requestor,omitempty"`
+	AuthnToken    string         `json:"authn_token,omitempty"`
+	ClientID      string         `json:"client_id,omitempty"`
+	ClientSecret  string         `json:"client_secret,omitempty"`
+	AccessToken   string         `json:"access_token,omitempty"`
+	AccessExpires time.Time      `json:"access_expires,omitempty"`
+	DeviceID      string         `json:"device_id,omitempty"`
+	Fingerprint   string         `json:"fingerprint,omitempty"`
+	PassSFP       string         `json:"pass_sfp,omitempty"`
+	Pending       *Pending       `json:"pending,omitempty"`
+	Activation    *Activation    `json:"activation,omitempty"`
+	Cookies       []StoredCookie `json:"cookies,omitempty"`
+	FinalURL      string         `json:"final_url,omitempty"`
 }
 
 func loadState(path string) (State, error) {

@@ -103,8 +103,11 @@ func TestBrowserActivationThenPoll(t *testing.T) {
 		t.Fatalf("notice %q", view.Notice)
 	}
 	raw = readSession(t, path)
-	if strings.Contains(raw, secret) || strings.Contains(raw, pass) || !strings.Contains(raw, "guid-1") || !strings.Contains(raw, `"method": "browser"`) {
+	if !strings.Contains(raw, secret) || strings.Contains(raw, pass) || !strings.Contains(raw, "guid-1") || !strings.Contains(raw, `"method": "browser"`) {
 		t.Fatalf("stored session after poll:\n%s", raw)
+	}
+	if view.Expires.IsZero() || time.Until(view.Expires) < 24*time.Hour {
+		t.Fatalf("expiry fell back to a short lifetime: %s", view.Expires)
 	}
 	text := logs.String()
 	for _, hidden := range []string{secret, access, pass, code, "guid-1"} {

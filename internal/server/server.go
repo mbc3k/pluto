@@ -667,6 +667,9 @@ func (s *Server) tveStatus(base string) map[string]any {
 	if exp := formatTime(view.Expires); exp != "" {
 		out["expires"] = exp
 	}
+	if view.Renewal != "" {
+		out["renewal"] = view.Renewal
+	}
 	out["activation"] = view.Waiting
 	for _, link := range s.tve.List() {
 		playlist := s.tveURL(base, "/tve/"+link.ID+".m3u")
