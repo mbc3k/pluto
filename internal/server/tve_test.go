@@ -1,7 +1,10 @@
 package server
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -9,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mbc3k/pluto/internal/cache"
 	"github.com/mbc3k/pluto/internal/config"
@@ -192,3 +196,139 @@ func TestTVECodeWithoutPending(t *testing.T) {
 		t.Fatalf("combined should be off, got %d", rr.Code)
 	}
 }
+
+func TestTVEBrowserSignInPageAndStatus(t *testing.T) {
+	const token = "sekret"
+	const code = "REGCODE99"
+	const activateURL = "https://sp.auth.adobe.com/adobe-services/authenticate/saml?reg_code=" + code
+	cfg := &config.Config{
+		Port:            8080,
+		TVESources:      []string{"fox"},
+		TVEProvider:     "dtv",
+		TVECombined:     false,
+		TVEStartChannel: 20000,
+		TVESessionFile:  filepath.Join(t.TempDir(), "session.json"),
+		AccessToken:     token,
+	}
+	s := newServer(cache.New(0), nil, cfg, "dev")
+	fake := &fakeFeeds{view: tve.SignInView{
+		Waiting:       true,
+		ActivationURL: activateURL,
+		Code:          code,
+		Expires:       time.Date(2026, 10, 22, 1, 0, 0, 0, time.UTC),
+		Notice:        "Open the activation link in Safari or Firefox and sign in to DirecTV there.",
+	}}
+	s.tve = fake
+
+	if rr := do(s, http.MethodGet, "/tve/directv/activate", nil); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("open activate %d", rr.Code)
+	}
+	if rr := do(s, http.MethodGet, "/tve/directv/import", nil); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("open import %d", rr.Code)
+	}
+	if rr := do(s, http.MethodGet, "/tve/directv/activate?token="+token, nil); rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("get activate %d", rr.Code)
+	}
+
+	rr := do(s, http.MethodGet, "/tve/directv?token="+token, nil)
+	body := rr.Body.String()
+	if rr.Code != http.StatusOK || rr.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("page %d %s", rr.Code, rr.Header().Get("Cache-Control"))
+	}
+	if !strings.Contains(body, code) || !strings.Contains(body, activateURL) || !strings.Contains(body, `http-equiv="refresh"`) || !strings.Contains(body, "/tve/directv/activate?token="+token) || !strings.Contains(body, "/tve/directv/import?token="+token) {
+		t.Fatalf("sign-in page\n%s", body)
+	}
+	if fake.polled == 0 {
+		t.Fatal("sign-in page did not poll")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	req.Host = "dvr.example:8080"
+	rr = httptest.NewRecorder()
+	s.srv.Handler.ServeHTTP(rr, req)
+	if strings.Contains(rr.Body.String(), code) || strings.Contains(rr.Body.String(), "authenticate/saml") {
+		t.Fatalf("status leaked the activation\n%s", rr.Body.String())
+	}
+	var status map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	tveStatus, _ := status["tve"].(map[string]any)
+	if tveStatus["activation"] != true || tveStatus["expires"] != "2026-10-22 01:00:00Z" || tveStatus["signed_in"] != false {
+		t.Fatalf("tve status %#v", tveStatus)
+	}
+
+	rr = do(s, http.MethodGet, "/", nil)
+	if strings.Contains(rr.Body.String(), code) || strings.Contains(rr.Body.String(), "authenticate/saml") {
+		t.Fatalf("index leaked the activation\n%s", rr.Body.String())
+	}
+
+	post := httptest.NewRequest(http.MethodPost, "/tve/directv/activate?token="+token, nil)
+	rr = httptest.NewRecorder()
+	s.srv.Handler.ServeHTTP(rr, post)
+	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/tve/directv?token="+token || fake.began != 1 {
+		t.Fatalf("activate %d %s began=%d", rr.Code, rr.Header().Get("Location"), fake.began)
+	}
+
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	if err := w.WriteField("token", "pasted-authn-token"); err != nil {
+		t.Fatal(err)
+	}
+	part, err := w.CreateFormFile("cookies", "cookies.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte("cookie-export")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	post = httptest.NewRequest(http.MethodPost, "/tve/directv/import?token="+token, &buf)
+	post.Header.Set("Content-Type", w.FormDataContentType())
+	rr = httptest.NewRecorder()
+	s.srv.Handler.ServeHTTP(rr, post)
+	if rr.Code != http.StatusSeeOther || !strings.Contains(fake.imported, "pasted-authn-token") || !strings.Contains(fake.imported, "cookie-export") || strings.Contains(rr.Header().Get("Location"), "pasted-authn-token") {
+		t.Fatalf("import %d loc=%s imported=%q", rr.Code, rr.Header().Get("Location"), fake.imported)
+	}
+}
+
+type fakeFeeds struct {
+	view     tve.SignInView
+	imported string
+	began    int
+	polled   int
+	notice   string
+}
+
+func (f *fakeFeeds) List() []tve.Link {
+	return []tve.Link{{ID: "fox", Name: "Fox", Channels: 1}}
+}
+func (f *fakeFeeds) Playlist(id, base string) (string, bool) {
+	return "", false
+}
+func (f *fakeFeeds) Guide(id string) ([]byte, time.Time, bool) {
+	return nil, time.Time{}, false
+}
+func (f *fakeFeeds) SignIn() tve.SignInView {
+	v := f.view
+	if f.notice != "" {
+		v.Notice = f.notice
+	}
+	return v
+}
+func (f *fakeFeeds) SubmitCode(context.Context, string) error { return nil }
+func (f *fakeFeeds) StreamStatus(string, string) (string, bool) {
+	return "", false
+}
+func (f *fakeFeeds) PollActivation(context.Context) { f.polled++ }
+func (f *fakeFeeds) BeginBrowserSignIn(context.Context) error {
+	f.began++
+	return nil
+}
+func (f *fakeFeeds) ImportSession(raw string) error {
+	f.imported = raw
+	return nil
+}
+func (f *fakeFeeds) SetNotice(msg string) { f.notice = msg }

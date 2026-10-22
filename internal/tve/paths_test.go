@@ -6,6 +6,8 @@ func TestProtectedPath(t *testing.T) {
 	ok := []string{
 		"/tve/directv",
 		"/tve/directv/code",
+		"/tve/directv/activate",
+		"/tve/directv/import",
 		"/tve/fox.m3u",
 		"/tve/all.xml",
 		"/tve/amcn/amc/stream",

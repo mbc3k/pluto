@@ -8,7 +8,8 @@ import "strings"
 // covers both. Health, metrics, status, and the Pluto tuner routes are
 // not included here.
 func ProtectedPath(path string) bool {
-	if path == "/tve/directv" || path == "/tve/directv/code" {
+	switch path {
+	case "/tve/directv", "/tve/directv/code", "/tve/directv/activate", "/tve/directv/import":
 		return true
 	}
 	if !strings.HasPrefix(path, "/tve/") {

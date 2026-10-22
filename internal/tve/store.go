@@ -9,12 +9,19 @@ import (
 )
 
 // State is the on-disk DirecTV session. The password is never stored.
+// AuthnToken and Activation hold Adobe session material. The file is mode
+// 0600. Those values are not written to logs or the status page.
 type State struct {
-	Updated  time.Time      `json:"updated"`
-	Signed   bool           `json:"signed_in"`
-	Pending  *Pending       `json:"pending,omitempty"`
-	Cookies  []StoredCookie `json:"cookies,omitempty"`
-	FinalURL string         `json:"final_url,omitempty"`
+	Updated    time.Time      `json:"updated"`
+	Signed     bool           `json:"signed_in"`
+	Expires    time.Time      `json:"expires,omitempty"`
+	Method     string         `json:"method,omitempty"`
+	Requestor  string         `json:"requestor,omitempty"`
+	AuthnToken string         `json:"authn_token,omitempty"`
+	Pending    *Pending       `json:"pending,omitempty"`
+	Activation *Activation    `json:"activation,omitempty"`
+	Cookies    []StoredCookie `json:"cookies,omitempty"`
+	FinalURL   string         `json:"final_url,omitempty"`
 }
 
 func loadState(path string) (State, error) {

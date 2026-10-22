@@ -3,6 +3,7 @@ package tve
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -28,8 +29,10 @@ func TestRefreshParsesGuidesAndKeepsPrevious(t *testing.T) {
 			fmt.Fprint(w, `[{"timeslotId":"slot-1","startTime":1700000000000,"endTime":1700003600000,"series":{"title":"Ancient Aliens"},"program":{"title":"The Episode","description":"A & B"}}]`)
 		case r.Method == http.MethodPost && r.URL.Query().Get("brand") != "":
 			fmt.Fprint(w, `{"data":{"nowPlaying":{"startTime":1700010000,"endTime":1700013600,"program":{"__typename":"Episode","title":"Live Ep","description":"live","series":{"title":"Live Show"}}}}}`)
-		case r.URL.Query().Get("network") == "TNT":
+		case r.URL.Query().Get("network") != "":
 			fmt.Fprint(w, `{"day":[{"gmt":"Mon Aug 03 06:04:00 GMT 2026","pacific":"Mon Aug 03 06:04:00 PDT 2026","slotLength":30,"show":{"programTitle":"TNT Show","episode":{"episodeTitle":"Part 1","description":"east desc"}}}]}`)
+		case strings.Contains(r.URL.Path, "/graphql"):
+			fmt.Fprint(w, `{"data":{"getScheduleEntries":[]}}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -95,6 +98,7 @@ func TestConcurrentRefreshAndPlaylist(t *testing.T) {
 		TVEStartChannel: 20000,
 		TVESessionFile:  filepath.Join(t.TempDir(), "session.json"),
 	})
+	svc.client = offlineClient(t)
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
@@ -121,6 +125,7 @@ func TestLineupWithoutCredentials(t *testing.T) {
 		TVEStartChannel: 20000,
 		TVESessionFile:  filepath.Join(t.TempDir(), "session.json"),
 	})
+	svc.client = offlineClient(t)
 	svc.refresh(context.Background())
 	pl, ok := svc.Playlist(combinedSourceID, "http://h")
 	if !ok {
@@ -164,10 +169,7 @@ func TestPendingSignInIsNotRestarted(t *testing.T) {
 		DirectvUsername: "viewer@example.com",
 		DirectvPassword: "s3cret-password",
 	})
-	svc.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		t.Errorf("pending sign-in made a request: %s", r.URL)
-		return nil, fmt.Errorf("no requests")
-	})}
+	svc.client = offlineClient(t)
 	svc.refresh(context.Background())
 	view := svc.SignIn()
 	if !view.Pending || view.Prompt != "Enter code" || view.Signed {
@@ -189,10 +191,7 @@ func TestStoredSignInIsReused(t *testing.T) {
 		DirectvUsername: "viewer@example.com",
 		DirectvPassword: "s3cret-password",
 	})
-	svc.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		t.Errorf("fresh sign-in was started: %s", r.URL)
-		return nil, fmt.Errorf("no requests")
-	})}
+	svc.client = offlineClient(t)
 	svc.refresh(context.Background())
 	view := svc.SignIn()
 	if !view.Signed || view.Pending {
@@ -213,3 +212,19 @@ func (h hostRewrite) RoundTrip(req *http.Request) (*http.Response, error) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func offlineClient(t *testing.T) *http.Client {
+	t.Helper()
+	return &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.Contains(r.URL.Host, "adobe") || strings.Contains(r.URL.Host, "directv") || strings.Contains(r.URL.Host, "dtvce") || strings.Contains(r.URL.Path, "/api/v2/") {
+			t.Errorf("sign-in request %s %s", r.Method, r.URL.Path)
+		}
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Status:     "404 Not Found",
+			Header:     http.Header{"Content-Type": []string{"text/html"}},
+			Body:       io.NopCloser(strings.NewReader("<html>offline</html>")),
+			Request:    r,
+		}, nil
+	}), Timeout: 5 * time.Second}
+}
