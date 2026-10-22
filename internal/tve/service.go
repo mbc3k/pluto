@@ -71,6 +71,11 @@ type Service struct {
 	confirmQuiet bool
 	warnedFor    time.Time
 	warnedLevel  int
+
+	playMu      sync.Mutex
+	authzCache  map[string]timedSecret
+	shortCache  map[string]timedSecret
+	streamCache map[string]timedStream
 }
 
 // NewService builds a service from configuration. Catalogs are available
@@ -87,6 +92,9 @@ func NewService(cfg *config.Config) *Service {
 		client:      newBrowserClient(),
 		adobeBase:   "https://sp.auth.adobe.com",
 		feeds:       map[string]source.Feed{},
+		authzCache:  map[string]timedSecret{},
+		shortCache:  map[string]timedSecret{},
+		streamCache: map[string]timedStream{},
 	}
 	if s.every <= 0 {
 		s.every = 3 * time.Hour
@@ -211,23 +219,21 @@ func (s *Service) SubmitCode(ctx context.Context, code string) error {
 	return s.storeOutcome(out, client)
 }
 
-// StreamStatus is the plain-text answer for a network whose manifest is not
-// a public URL. It does not include credentials. ok is false when this
-// service is not serving that channel.
-func (s *Service) StreamStatus(sourceID, channelID string) (string, bool) {
+// localStream reports whether this service exposes that channel on
+// /tve/{source}/{channel}/stream.
+func (s *Service) localStream(sourceID, channelID string) bool {
 	s.mu.Lock()
 	f, ok := s.feeds[sourceID]
 	s.mu.Unlock()
 	if !ok || channelID == "" {
-		return "", false
+		return false
 	}
 	for _, ch := range f.Channels {
-		if ch.ID != channelID || !strings.HasPrefix(ch.StreamURL, "/") {
-			continue
+		if ch.ID == channelID && strings.HasPrefix(ch.StreamURL, "/") {
+			return true
 		}
-		return "this stream is issued only after DirecTV authorizes " + DisplayName(sourceID) + "; playback still needs a live check with real credentials", true
 	}
-	return "", false
+	return false
 }
 
 func (s *Service) feed(id string) (source.Feed, bool) {

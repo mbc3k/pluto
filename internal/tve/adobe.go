@@ -48,6 +48,11 @@ type adobeSession struct {
 	CodeExpires   time.Time
 	AuthURL       string
 	AccessExpires time.Time
+	// NameID and SessionIndex are the SAML identifiers from the stored
+	// authn token. Adobe's authorize call expects them as ap_19 and ap_23.
+	// They are not persisted on their own and are not logged.
+	NameID       string
+	SessionIndex string
 }
 
 func (s *Service) registration() (requestor, kind string, scripted bool) {
@@ -288,6 +293,12 @@ func (s *Service) adobeHeaders(sess *adobeSession, accept string) map[string]str
 	}
 	if sess.PassSFP != "" {
 		h["pass_sfp"] = sess.PassSFP
+	}
+	if sess.NameID != "" {
+		h["ap_19"] = sess.NameID
+	}
+	if sess.SessionIndex != "" {
+		h["ap_23"] = sess.SessionIndex
 	}
 	return h
 }
