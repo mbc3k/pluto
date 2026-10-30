@@ -70,6 +70,40 @@ func TestStatementFixtures(t *testing.T) {
 	}
 }
 
+func TestAuthnExpiryFormats(t *testing.T) {
+	want := time.Date(2027, 1, 20, 15, 4, 5, 0, time.UTC)
+	samples := []string{
+		`<simpleTokenExpires>2027/01/20 15:04:05 GMT</simpleTokenExpires>`,
+		`<simpleTokenExpires>2027/01/20 15:04:05_GMT</simpleTokenExpires>`,
+		`<ns2:simpleTokenExpires format="gmt">2027/01/20 15:04:05 GMT</ns2:simpleTokenExpires>`,
+		`<simpleTokenExpires><![CDATA[2027/01/20 15:04:05 GMT]]></simpleTokenExpires>`,
+		`<authnToken>&lt;simpleTokenExpires&gt;2027/01/20 15:04:05 GMT&lt;/simpleTokenExpires&gt;</authnToken>`,
+		`<simpleTokenExpires>2027-01-20T15:04:05Z</simpleTokenExpires>`,
+	}
+	for _, sample := range samples {
+		got := tokenExpiry(sample)
+		if !got.Equal(want) {
+			t.Fatalf("expiry %s from %s", got, sample)
+		}
+	}
+	if got := tokenExpiry(authnFixture("2000000000000")); got.Year() != 2033 {
+		t.Fatalf("millisecond expiry %s", got)
+	}
+	if got := tokenExpiry(`<simpleTokenExpires>1790000000</simpleTokenExpires>`); got.Unix() != 1790000000 {
+		t.Fatalf("second expiry %s", got)
+	}
+	if !tokenExpiry(`<simpleTokenTTL>43200</simpleTokenTTL>`).IsZero() || !tokenExpiry(`<simpleTokenExpires>43200</simpleTokenExpires>`).IsZero() {
+		t.Fatal("a 12 hour duration must not become the authentication expiry")
+	}
+	if !tokenExpiry(`<simpleTokenExpires>not-a-time</simpleTokenExpires>`).IsZero() {
+		t.Fatal("unreadable expiry should stay empty")
+	}
+	check := authnCheckExpiry([]byte(`<?xml version="1.0"?><authentication><expires>2000000000000</expires></authentication>`))
+	if check.Year() != 2033 {
+		t.Fatalf("check expiry %s", check)
+	}
+}
+
 func TestAuthnTokenShape(t *testing.T) {
 	raw := authnFixture("2000000000000")
 	token, exp, err := normalizeAuthnToken(raw)

@@ -37,6 +37,10 @@ type SignInView struct {
 	Expires       time.Time
 	ActivationURL string
 	Code          string
+	// Renewal is "client" when the Adobe access token can be refreshed
+	// without a browser, "retrying" when that refresh is backing off, and
+	// "needs_browser" when only a person can extend the DirecTV login.
+	Renewal string
 }
 
 // Service refreshes enabled TV Everywhere sources and remembers a DirecTV
@@ -59,6 +63,19 @@ type Service struct {
 	signMu sync.Mutex
 	feeds  map[string]source.Feed
 	signIn SignInView
+
+	renewNext    time.Time
+	renewDelay   time.Duration
+	confirmNext  time.Time
+	confirmDelay time.Duration
+	confirmQuiet bool
+	warnedFor    time.Time
+	warnedLevel  int
+
+	playMu      sync.Mutex
+	authzCache  map[string]timedSecret
+	shortCache  map[string]timedSecret
+	streamCache map[string]timedStream
 }
 
 // NewService builds a service from configuration. Catalogs are available
@@ -75,6 +92,9 @@ func NewService(cfg *config.Config) *Service {
 		client:      newBrowserClient(),
 		adobeBase:   "https://sp.auth.adobe.com",
 		feeds:       map[string]source.Feed{},
+		authzCache:  map[string]timedSecret{},
+		shortCache:  map[string]timedSecret{},
+		streamCache: map[string]timedStream{},
 	}
 	if s.every <= 0 {
 		s.every = 3 * time.Hour
@@ -199,23 +219,21 @@ func (s *Service) SubmitCode(ctx context.Context, code string) error {
 	return s.storeOutcome(out, client)
 }
 
-// StreamStatus is the plain-text answer for a network whose manifest is not
-// a public URL. It does not include credentials. ok is false when this
-// service is not serving that channel.
-func (s *Service) StreamStatus(sourceID, channelID string) (string, bool) {
+// localStream reports whether this service exposes that channel on
+// /tve/{source}/{channel}/stream.
+func (s *Service) localStream(sourceID, channelID string) bool {
 	s.mu.Lock()
 	f, ok := s.feeds[sourceID]
 	s.mu.Unlock()
 	if !ok || channelID == "" {
-		return "", false
+		return false
 	}
 	for _, ch := range f.Channels {
-		if ch.ID != channelID || !strings.HasPrefix(ch.StreamURL, "/") {
-			continue
+		if ch.ID == channelID && strings.HasPrefix(ch.StreamURL, "/") {
+			return true
 		}
-		return "this stream is issued only after DirecTV authorizes " + DisplayName(sourceID) + "; playback still needs a live check with real credentials", true
 	}
-	return "", false
+	return false
 }
 
 func (s *Service) feed(id string) (source.Feed, bool) {
@@ -541,16 +559,17 @@ func (s *Service) BeginBrowserSignIn(ctx context.Context) error {
 		return err
 	}
 	st := State{Activation: &Activation{
-		Code:         sess.Code,
-		URL:          sess.AuthURL,
-		Requestor:    sess.Requestor,
-		Expires:      sess.CodeExpires,
-		ClientID:     sess.ClientID,
-		ClientSecret: sess.ClientSecret,
-		AccessToken:  sess.AccessToken,
-		DeviceID:     sess.DeviceID,
-		Fingerprint:  sess.Fingerprint,
-		PassSFP:      sess.PassSFP,
+		Code:          sess.Code,
+		URL:           sess.AuthURL,
+		Requestor:     sess.Requestor,
+		Expires:       sess.CodeExpires,
+		ClientID:      sess.ClientID,
+		ClientSecret:  sess.ClientSecret,
+		AccessToken:   sess.AccessToken,
+		DeviceID:      sess.DeviceID,
+		Fingerprint:   sess.Fingerprint,
+		PassSFP:       sess.PassSFP,
+		AccessExpires: sess.AccessExpires,
 	}}
 	if err := saveState(s.sessionPath, st); err != nil {
 		s.setNotice("DirecTV browser sign-in started but the session file was not saved.")
@@ -616,9 +635,16 @@ func (s *Service) trySignInLocked(ctx context.Context) {
 		s.applyState(st)
 		return
 	}
-	if sessionFresh(st) {
-		s.applyState(st)
-		return
+	if st.Signed || st.AuthnToken != "" {
+		s.maintainAuthn(ctx, &st)
+		if authnCurrent(st) {
+			s.applyState(st)
+			return
+		}
+		if st.AuthnToken != "" {
+			s.noteAuthnExpired(st)
+			return
+		}
 	}
 	_, _, scripted := s.registration()
 	if s.user == "" || s.password == "" {
@@ -658,7 +684,8 @@ func (s *Service) trySignInLocked(ctx context.Context) {
 	}
 	saved.AuthnToken = token
 	saved.Method = "scripted"
-	saved.Requestor = sess.Requestor
+	saved.Signed = true
+	adoptClient(&saved, sess)
 	if exp := tokenExpiry(token); !exp.IsZero() {
 		saved.Expires = exp
 	}
@@ -712,10 +739,20 @@ func (s *Service) pollActivationLocked(ctx context.Context, st State) {
 	st.Method = "browser"
 	st.AuthnToken = token
 	st.Requestor = st.Activation.Requestor
-	st.Expires = tokenExpiry(token)
-	if st.Expires.IsZero() {
-		st.Expires = time.Now().Add(12 * time.Hour).UTC()
+	st.ClientID = st.Activation.ClientID
+	st.ClientSecret = st.Activation.ClientSecret
+	st.AccessToken = st.Activation.AccessToken
+	st.AccessExpires = st.Activation.AccessExpires
+	st.DeviceID = st.Activation.DeviceID
+	st.Fingerprint = st.Activation.Fingerprint
+	st.PassSFP = st.Activation.PassSFP
+	if st.AccessToken != "" && st.AccessExpires.IsZero() {
+		st.AccessExpires = time.Now().Add(accessLifetime(0)).UTC()
 	}
+	// The DirecTV authentication lives as long as simpleTokenExpires says.
+	// A token we cannot read is kept with an empty expiry and refreshed
+	// until Adobe rejects it. It is not given a 12-hour stand-in.
+	st.Expires = tokenExpiry(token)
 	st.Activation = nil
 	st.Pending = nil
 	if err := saveState(s.sessionPath, st); err != nil {
@@ -725,17 +762,25 @@ func (s *Service) pollActivationLocked(ctx context.Context, st State) {
 	s.applyState(st)
 }
 
-func sessionFresh(st State) bool {
-	if !st.Signed {
+// authnCurrent reports whether the stored DirecTV authentication should
+// still be used. A parsed expiry is honored until that instant. A token
+// whose expiry could not be read stays in use. A cookie-only scripted
+// session with no authentication token is reused for 12 hours from the
+// time it was written.
+func authnCurrent(st State) bool {
+	if !st.Signed && st.AuthnToken == "" {
 		return false
 	}
 	if !st.Expires.IsZero() {
-		return time.Until(st.Expires) > time.Hour
+		return time.Now().Before(st.Expires)
 	}
-	return !st.Updated.IsZero() && time.Since(st.Updated) < 12*time.Hour
+	if st.AuthnToken != "" {
+		return true
+	}
+	return st.Signed && !st.Updated.IsZero() && time.Since(st.Updated) < 12*time.Hour
 }
 
-func signedNotice(st State) string {
+func (s *Service) signedNotice(st State) string {
 	how := "DirecTV session is stored"
 	switch st.Method {
 	case "browser":
@@ -745,10 +790,37 @@ func signedNotice(st State) string {
 	case "scripted":
 		how = "Scripted DirecTV session is stored"
 	}
-	if st.Expires.IsZero() {
-		return how + ". Sign in again from the DirecTV page if playback starts failing. The scripted password login is only a fallback."
+	when := "Sign in again from the DirecTV page if playback starts failing."
+	if st.AuthnToken != "" && st.Expires.IsZero() {
+		when = "The authentication token did not include a readable expiry, so this session stays until Adobe rejects it."
 	}
-	return fmt.Sprintf("%s. It expires %s. Open the DirecTV sign-in page and start browser sign-in again before then. The scripted password login is only a fallback.", how, clock(st.Expires))
+	if !st.Expires.IsZero() {
+		when = fmt.Sprintf("DirecTV authentication expires %s.", clock(st.Expires))
+	}
+	switch s.renewalKind(st) {
+	case renewalClient:
+		return how + ". " + when + " The Adobe client token refreshes on its own until then. Start browser sign-in again in Safari or Firefox before that date. The scripted password login cannot extend it."
+	case renewalRetry:
+		return how + ". " + when + " Refreshing the Adobe client token failed and will be retried. The DirecTV sign-in is still stored."
+	default:
+		if st.ClientID == "" {
+			return how + ". " + when + " This file has no Adobe client identity, so headless renewal cannot run. Start browser sign-in once more on this page; after that the client token refreshes on its own until the DirecTV authentication expires."
+		}
+		return how + ". " + when + " Start browser sign-in again in Safari or Firefox before then. Silent refresh cannot extend the DirecTV login itself."
+	}
+}
+
+func (s *Service) noteAuthnExpired(st State) {
+	when := "DirecTV authentication has expired."
+	if !st.Expires.IsZero() {
+		when = fmt.Sprintf("DirecTV authentication expired %s.", clock(st.Expires))
+	}
+	s.setSignIn(SignInView{
+		Method:  st.Method,
+		Expires: st.Expires,
+		Renewal: renewalBrowser,
+		Notice:  when + " Start browser sign-in on this page in Safari or Firefox. The scripted password login cannot extend it.",
+	})
 }
 
 func (s *Service) storeOutcome(out *Outcome, client *http.Client) error {
@@ -785,7 +857,8 @@ func (s *Service) applyState(st State) {
 		view.Prompt = st.Pending.Prompt
 		view.Notice = "DirecTV needs another step. Submit the code or menu choice. A browser sign-in in Safari or Firefox does not use this prompt."
 	case st.Signed:
-		view.Notice = signedNotice(st)
+		view.Notice = s.signedNotice(st)
+		view.Renewal = s.renewalKind(st)
 	}
 	s.setSignIn(view)
 }

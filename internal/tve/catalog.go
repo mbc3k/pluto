@@ -73,8 +73,8 @@ var catalogs = map[string]catalog{
 	SourceFox: {
 		name: "FOX",
 		channels: []source.Channel{
-			{ID: "fox_news", Name: "Fox News Channel", Category: "News", StreamURL: "https://247.foxnews.com/hls/live/2003586/FNCHLSv3/master.m3u8"},
-			{ID: "fox_business", Name: "Fox Business Network", Category: "Business", StreamURL: "https://247.foxbusiness.com/hls/live/2003756/FBNHLSv3/master.m3u8"},
+			{ID: "fox_news", Name: "Fox News Channel", Category: "News", StreamURL: "/tve/fox/fox_news/stream"},
+			{ID: "fox_business", Name: "Fox Business Network", Category: "Business", StreamURL: "/tve/fox/fox_business/stream"},
 			{ID: "fox_weather", Name: "Fox Weather", Category: "News", StreamURL: "https://content.uplynk.com/db88cebb80ea46269a1b2691871f3660.m3u8"},
 			{ID: "fox_sports_fs1", Name: "FS1", Category: "Sports", StreamURL: "/tve/fox/fox_sports_fs1/stream"},
 			{ID: "fox_sports_fs2", Name: "FS2", Category: "Sports", StreamURL: "/tve/fox/fox_sports_fs2/stream"},
