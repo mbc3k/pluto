@@ -14,7 +14,7 @@ func clearConfigEnv(t *testing.T) {
 		"PLUTO_EMAIL", "PLUTO_PASSWORD", "PLUTO_CONFIG",
 		"PORT", "START_CHANNEL", "TUNER_COUNT", "DEVICE_ID_FILE",
 		"BIND_ADDR", "ACCESS_TOKEN", "REFRESH_EVERY", "GUIDE_HOURS",
-		"TVE_SOURCES", "TVE_PROVIDER", "TVE_COMBINED",
+		"TVE_SOURCES", "TVE_PROVIDER", "TVE_COMBINED", "TVE_HIDE_UNENTITLED",
 		"TVE_START_CHANNEL", "TVE_SESSION_FILE", "DIRECTV_USERNAME", "DIRECTV_PASSWORD",
 	} {
 		t.Setenv(k, "")
@@ -289,6 +289,15 @@ func TestLoadTVEAndAccessToken(t *testing.T) {
 	if cfg.TVESessionFile != "/data/tve.json" {
 		t.Fatalf("session %s", cfg.TVESessionFile)
 	}
+	if cfg.TVEShowUnentitled {
+		t.Fatal("unentitled channels are hidden unless TVE_HIDE_UNENTITLED is false")
+	}
+	t.Setenv("TVE_HIDE_UNENTITLED", "false")
+	shown, err := Load()
+	if err != nil || !shown.TVEShowUnentitled {
+		t.Fatalf("show unentitled %+v %v", shown, err)
+	}
+	t.Setenv("TVE_HIDE_UNENTITLED", "")
 
 	t.Setenv("TVE_COMBINED", "false")
 	t.Setenv("TVE_PROVIDER", "xfinity")

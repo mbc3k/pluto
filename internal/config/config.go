@@ -36,23 +36,24 @@ var defaultConfPaths = []string{
 
 // Config holds all runtime configuration for the pluto service.
 type Config struct {
-	Email           string
-	Password        string
-	StartChannel    int
-	Port            int
-	BindAddr        string // host or IP only; empty listens on all interfaces
-	AccessToken     string // empty leaves playlist and EPG URLs open
-	TunerCount      int
-	RefreshEvery    time.Duration
-	GuideHours      int
-	DeviceIDFile    string
-	TVESources      []string
-	TVEProvider     string
-	TVECombined     bool
-	TVEStartChannel int
-	TVESessionFile  string
-	DirectvUsername string
-	DirectvPassword string
+	Email             string
+	Password          string
+	StartChannel      int
+	Port              int
+	BindAddr          string // host or IP only; empty listens on all interfaces
+	AccessToken       string // empty leaves playlist and EPG URLs open
+	TunerCount        int
+	RefreshEvery      time.Duration
+	GuideHours        int
+	DeviceIDFile      string
+	TVESources        []string
+	TVEProvider       string
+	TVECombined       bool
+	TVEStartChannel   int
+	TVESessionFile    string
+	TVEShowUnentitled bool // true only when TVE_HIDE_UNENTITLED is explicitly false
+	DirectvUsername   string
+	DirectvPassword   string
 }
 
 // ListenAddr is the address passed to net.Listen. An empty BindAddr keeps
@@ -162,6 +163,13 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("TVE_PROVIDER %q is not supported; this build signs in with DirecTV (dtv)", cfg.TVEProvider)
 	}
 	cfg.TVECombined = true
+	if s := strings.TrimSpace(get("TVE_HIDE_UNENTITLED")); s != "" {
+		hide, err := strconv.ParseBool(s)
+		if err != nil {
+			return nil, fmt.Errorf("TVE_HIDE_UNENTITLED: %w", err)
+		}
+		cfg.TVEShowUnentitled = !hide
+	}
 	if s := strings.TrimSpace(get("TVE_COMBINED")); s != "" {
 		combined, err := strconv.ParseBool(s)
 		if err != nil {

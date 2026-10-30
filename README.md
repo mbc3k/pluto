@@ -153,6 +153,7 @@ Set `TVE_SOURCES` to turn the feature on. Each enabled source has its own playli
 | `TVE_SOURCES` | empty (off) | Comma-separated `aenetworks`, `amcn`, `warner`, `fox`, `discovery`. Unknown ids are a startup error. Duplicates are dropped. |
 | `TVE_PROVIDER` | `dtv` when any source is set | Only `dtv`. Anything else is a startup error. |
 | `TVE_COMBINED` | `true` | Go bool (`true`, `false`, `1`, `0`). |
+| `TVE_HIDE_UNENTITLED` | `true` | Go bool. After Adobe says `notAuthorized`, that channel is left out of the M3U and the guide. `false` keeps it listed. |
 | `TVE_START_CHANNEL` | `20000` | Integer ≥ 0. |
 | `DIRECTV_USERNAME` | empty | Trimmed. Lineups still serve when this is empty. |
 | `DIRECTV_PASSWORD` | empty | Kept as written, including spaces. Never logged and never written to the session file. |
@@ -177,6 +178,8 @@ Browser sign-in keeps the Adobe client id, client secret, device id, fingerprint
 A session file written before those client fields were kept cannot refresh headlessly. One more browser sign-in stores them. Until then `renewal` is `needs_browser` and the sign-in page says so. The false 12-hour date is still corrected on the next refresh when the stored token contains `simpleTokenExpires`.
 
 `GET /api/v1/tokens/authn` reports the current expiry. It does not extend the login. The check runs when the stored expiry is unknown or inside 24 hours, and only when a device id and access token are on file. HTTP 404, 401, and 400 are logged once and retried a day later; the session stays. HTTP 410 is ignored when the token's own timestamp is still more than a day ahead. Otherwise the session is marked expired and a later refresh does not bring it back from the old timestamp. One WARN is logged when the DirecTV authentication is within 24 hours, one when it is within an hour, and one when it has expired. With the default 3-hour guide interval, a refresh can land inside the last day and skip the last-hour warning.
+
+When Adobe answers `notAuthorized`, the stream is `403` and the body is `adobe authorize: not in your provider package`. The log line is `tve channel not in provider package` with the source, channel, and requestor. That channel is then left out of the M3U and the guide, and `/status` lists it under `tve.hidden`. Set `TVE_HIDE_UNENTITLED=false` to keep the channel listed. Any other playback failure stays in the lineup and is logged as `tve playback failed` with the step name.
 
 AMC's refresh call must send the refresh token from the unauth response, not the access token. The cache hashes from that response are sent on the later calls. A refresh 401 or 403 is logged and playback continues with the unauth token. Every `/tve/{source}/{channel}/stream` request logs `tve stream request` and then `tve stream` with the source, channel, and HTTP status, including a 503. AMC also logs `tve playback step` for unauth, refresh, mvpd-auth, and playback with the host, path, and status. `/status` `tve.playback` is the same result. Startup logs `pluto starting` with `version` and `commit`, and `tve session loaded` with whether an authn token is on disk. A browser or pasted session is not replaced by the scripted password login. That login logs `directv scripted sign-in starting` only when the session file has no authentication token.
 

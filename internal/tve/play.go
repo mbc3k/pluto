@@ -36,10 +36,11 @@ type StreamTarget struct {
 // return as the HTTP body. Retry is set when a later attempt should drop
 // cached Adobe tokens and call the network again.
 type PlayError struct {
-	Step   string
-	Status int
-	Detail string
-	Retry  bool
+	Step    string
+	Status  int
+	Detail  string
+	Retry   bool
+	Package bool
 }
 
 func (e *PlayError) Error() string {
@@ -163,8 +164,28 @@ func (s *Service) logPlay(spec playSpec, err error) {
 		status = http.StatusServiceUnavailable
 	}
 	detail := redact(err.Error(), secrets...)
+	if pe != nil && pe.Package {
+		slog.Warn("tve channel not in provider package", "source", spec.source, "channel", spec.channel, "requestor", spec.requestor, "status", status)
+		s.denyChannel(spec.source, spec.channel)
+	}
 	slog.Warn("tve playback failed", "source", spec.source, "channel", spec.channel, "status", status, "err", detail)
 	s.notePlayback(spec.source, spec.channel, status, detail)
+}
+
+func packageDeny(step string) *PlayError {
+	return &PlayError{Step: step, Status: http.StatusForbidden, Detail: "not in your provider package", Package: true}
+}
+
+func (s *Service) denyChannel(sourceID, channelID string) {
+	if s.showUnentitled || sourceID == "" || channelID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.denied == nil {
+		s.denied = map[string]struct{}{}
+	}
+	s.denied[sourceID+"\n"+channelID] = struct{}{}
 }
 
 func (s *Service) notePlayback(source, channel string, status int, detail string) {

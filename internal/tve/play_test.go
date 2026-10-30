@@ -97,18 +97,33 @@ func TestAdobeNotAuthorizedNamesTheStep(t *testing.T) {
 		t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 	}))
 	defer srv.Close()
+	logs := captureLogs(t)
 	svc := newPlayService(t, SourceAMC, "pw")
 	wirePlay(t, svc, srv)
 	_, err := svc.OpenStream(context.Background(), SourceAMC, "amc")
-	if err == nil || !strings.Contains(err.Error(), "adobe authorize") || strings.Contains(err.Error(), "guid-1") {
+	if err == nil || err.Error() != "adobe authorize: not in your provider package" || strings.Contains(err.Error(), "guid-1") {
 		t.Fatalf("err %v", err)
 	}
 	var pe *PlayError
-	if !asPlay(err, &pe) || pe.Status != http.StatusForbidden || pe.Retry {
+	if !asPlay(err, &pe) || pe.Status != http.StatusForbidden || pe.Retry || !pe.Package {
 		t.Fatalf("play error %#v", pe)
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("retried a hard denial %d", calls.Load())
+	}
+	if !strings.Contains(logs.String(), "tve channel not in provider package") || !strings.Contains(logs.String(), "channel=amc") {
+		t.Fatalf("log\n%s", logs.String())
+	}
+	pl, ok := svc.Playlist(SourceAMC, "http://h")
+	if !ok || strings.Contains(pl, "channel-id=\"amc\"") || !strings.Contains(pl, "channel-id=\"ifc\"") {
+		t.Fatalf("playlist\n%s", pl)
+	}
+	guide, _, ok := svc.Guide(SourceAMC)
+	if !ok || strings.Contains(string(guide), `id="amc"`) || !strings.Contains(string(guide), `id="ifc"`) {
+		t.Fatalf("guide\n%s", guide)
+	}
+	if svc.SignIn().Hidden != "amcn/amc" {
+		t.Fatalf("hidden %q", svc.SignIn().Hidden)
 	}
 }
 
@@ -330,6 +345,43 @@ func TestFoxSportsRejectsAnonymousDevice(t *testing.T) {
 	_, err := svc.OpenStream(context.Background(), SourceFox, "fox_sports_fs1")
 	if err == nil || !strings.Contains(err.Error(), "fox sports checkadobeauthn") || strings.Contains(err.Error(), anon) || playback.Load() != 0 {
 		t.Fatalf("err %v playback %d", err, playback.Load())
+	}
+}
+
+func TestShowUnentitledKeepsDeniedChannel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v2/") {
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Path == "/adobe-services/authorize" {
+			fmt.Fprint(w, `<error><notAuthorized/></error>`)
+			return
+		}
+		t.Errorf("unexpected %s", r.URL.Path)
+	}))
+	defer srv.Close()
+	path := filepath.Join(t.TempDir(), "session.json")
+	if err := saveState(path, State{
+		Signed: true, Method: "browser",
+		Expires:    time.Date(2027, 1, 20, 15, 4, 5, 0, time.UTC),
+		AuthnToken: `<authnToken><simpleTokenMsoID>DTV</simpleTokenMsoID></authnToken>`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(&config.Config{
+		TVESources:        []string{SourceAMC},
+		TVESessionFile:    path,
+		TVEShowUnentitled: true,
+	})
+	wirePlay(t, svc, srv)
+	_, err := svc.OpenStream(context.Background(), SourceAMC, "amc")
+	if err == nil || !strings.Contains(err.Error(), "not in your provider package") {
+		t.Fatalf("%v", err)
+	}
+	pl, ok := svc.Playlist(SourceAMC, "http://h")
+	if !ok || !strings.Contains(pl, "channel-id=\"amc\"") {
+		t.Fatalf("playlist\n%s", pl)
 	}
 }
 

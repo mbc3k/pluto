@@ -176,7 +176,7 @@ func (s *Service) decisionToken(ctx context.Context, st State, requestor, resour
 			continue
 		}
 		if auth, ok := row["authorized"].(bool); ok && !auth {
-			return "", playFail("adobe decision", http.StatusForbidden, "DirecTV is not entitled to "+requestor, false)
+			return "", packageDeny("adobe decision")
 		}
 		token, _ := row["token"].(map[string]any)
 		serialized := strings.TrimSpace(asText(token["serializedToken"]))
@@ -203,7 +203,10 @@ func adobeFault(step, requestor string, got fetched, secrets []string) *PlayErro
 	if strings.Contains(text, "pendinglogout") {
 		return playFail(step, http.StatusUnauthorized, "DirecTV session expired (pendingLogout) for "+requestor, false)
 	}
-	if strings.Contains(text, "notauthorized") || (got.Status < 400 && strings.Contains(text, "<error")) {
+	if strings.Contains(text, "notauthorized") {
+		return packageDeny(step)
+	}
+	if got.Status < 400 && strings.Contains(text, "<error") {
 		detail := "DirecTV is not entitled to " + requestor
 		if snip := snippet(got.Body, secrets...); snip != "" {
 			detail = snip

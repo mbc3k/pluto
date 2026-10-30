@@ -44,6 +44,9 @@ type SignInView struct {
 	// Playback is the last /stream result, safe to show on /status.
 	// It names the source, channel, HTTP status, and failing step.
 	Playback string
+	// Hidden lists channels Adobe said are not in the provider package,
+	// as source/channel pairs. They are left out of playlists and guides.
+	Hidden string
 }
 
 // Service refreshes enabled TV Everywhere sources and remembers a DirecTV
@@ -76,29 +79,32 @@ type Service struct {
 	warnedFor    time.Time
 	warnedLevel  int
 
-	playMu      sync.Mutex
-	authzCache  map[string]timedSecret
-	shortCache  map[string]timedSecret
-	streamCache map[string]timedStream
+	playMu         sync.Mutex
+	showUnentitled bool
+	denied         map[string]struct{}
+	authzCache     map[string]timedSecret
+	shortCache     map[string]timedSecret
+	streamCache    map[string]timedStream
 }
 
 // NewService builds a service from configuration. Catalogs are available
 // immediately; guides and DirecTV sign-in fill in when Run is called.
 func NewService(cfg *config.Config) *Service {
 	s := &Service{
-		sources:     append([]string(nil), cfg.TVESources...),
-		combined:    cfg.TVECombined,
-		start:       cfg.TVEStartChannel,
-		user:        cfg.DirectvUsername,
-		password:    cfg.DirectvPassword,
-		sessionPath: cfg.TVESessionFile,
-		every:       cfg.RefreshEvery,
-		client:      newBrowserClient(),
-		adobeBase:   "https://sp.auth.adobe.com",
-		feeds:       map[string]source.Feed{},
-		authzCache:  map[string]timedSecret{},
-		shortCache:  map[string]timedSecret{},
-		streamCache: map[string]timedStream{},
+		sources:        append([]string(nil), cfg.TVESources...),
+		combined:       cfg.TVECombined,
+		start:          cfg.TVEStartChannel,
+		user:           cfg.DirectvUsername,
+		password:       cfg.DirectvPassword,
+		sessionPath:    cfg.TVESessionFile,
+		every:          cfg.RefreshEvery,
+		showUnentitled: cfg.TVEShowUnentitled,
+		client:         newBrowserClient(),
+		adobeBase:      "https://sp.auth.adobe.com",
+		feeds:          map[string]source.Feed{},
+		authzCache:     map[string]timedSecret{},
+		shortCache:     map[string]timedSecret{},
+		streamCache:    map[string]timedStream{},
 	}
 	if s.every <= 0 {
 		s.every = 3 * time.Hour
@@ -158,7 +164,7 @@ func (s *Service) List() []Link {
 	out := make([]Link, 0, len(s.sources)+1)
 	for _, id := range s.sources {
 		f := s.feeds[id]
-		out = append(out, Link{ID: id, Name: f.Name, Channels: len(f.Channels), Updated: f.Updated})
+		out = append(out, Link{ID: id, Name: f.Name, Channels: len(s.visible(id, f.Channels)), Updated: f.Updated})
 	}
 	if s.combined && len(s.sources) > 0 {
 		f := s.combinedFeed()
@@ -199,6 +205,7 @@ func (s *Service) SignIn() SignInView {
 	defer s.mu.Unlock()
 	view := s.signIn
 	view.Playback = s.playback
+	view.Hidden = s.hiddenLocked()
 	return view
 }
 
@@ -260,6 +267,7 @@ func (s *Service) feedLocked(id string) (source.Feed, bool) {
 	if !ok {
 		return source.Feed{}, false
 	}
+	f.Channels = s.visible(id, f.Channels)
 	return f, true
 }
 
@@ -268,13 +276,42 @@ func (s *Service) combinedFeed() source.Feed {
 	var latest time.Time
 	for _, id := range s.sources {
 		part := s.feeds[id]
-		f.Channels = append(f.Channels, part.Channels...)
+		f.Channels = append(f.Channels, s.visible(id, part.Channels)...)
 		if part.Updated.After(latest) {
 			latest = part.Updated
 		}
 	}
 	f.Updated = latest
 	return f
+}
+
+func (s *Service) visible(sourceID string, channels []source.Channel) []source.Channel {
+	if s.showUnentitled || len(s.denied) == 0 {
+		return channels
+	}
+	out := make([]source.Channel, 0, len(channels))
+	for _, ch := range channels {
+		if _, hide := s.denied[sourceID+"\n"+ch.ID]; hide {
+			continue
+		}
+		out = append(out, ch)
+	}
+	return out
+}
+
+func (s *Service) hiddenLocked() string {
+	if len(s.denied) == 0 {
+		return ""
+	}
+	var names []string
+	for _, id := range s.sources {
+		for _, ch := range s.feeds[id].Channels {
+			if _, hide := s.denied[id+"\n"+ch.ID]; hide {
+				names = append(names, id+"/"+ch.ID)
+			}
+		}
+	}
+	return strings.Join(names, ", ")
 }
 
 func (s *Service) startLocked(id string) int {
@@ -286,7 +323,7 @@ func (s *Service) startLocked(id string) int {
 		if sid == id {
 			return n
 		}
-		n += len(s.feeds[sid].Channels)
+		n += len(s.visible(sid, s.feeds[sid].Channels))
 	}
 	return s.start
 }
