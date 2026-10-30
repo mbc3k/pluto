@@ -129,9 +129,9 @@ func (s *Service) mediaTokenPreferDecision(ctx context.Context, st State, reques
 		s.storeSecret("short", requestor+"\n"+resource, tok, time.Now().Add(shortTTL))
 		return tok, nil
 	}
-	if pe, ok := err.(*PlayError); ok && pe.Status == http.StatusForbidden && !pe.Retry {
-		return "", err
-	}
+	// The sign-in client is usually registered for History. Its v2 decision
+	// for AMC can say not entitled even when the legacy authorize call,
+	// which is what Fox sports uses, still returns a media token.
 	return s.mediaToken(ctx, st, requestor, resource)
 }
 

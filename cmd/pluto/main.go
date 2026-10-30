@@ -26,7 +26,7 @@ var version = "dev"
 
 func main() {
 	setupLogger()
-	slog.Info("pluto starting", "version", version)
+	slog.Info("pluto starting", "version", version, "commit", server.Commit())
 
 	cfg, err := config.Load()
 	if err != nil {

@@ -71,6 +71,7 @@ type playSpec struct {
 // HLS target. A 401 or 403 from a network drops the cached Adobe tokens and
 // tries once more. Credentials are not included in the error text.
 func (s *Service) OpenStream(ctx context.Context, sourceID, channelID string) (StreamTarget, error) {
+	slog.Info("tve stream request", "source", sourceID, "channel", channelID)
 	spec, ok := playSpecFor(sourceID, channelID)
 	if !ok || !s.localStream(sourceID, channelID) {
 		return StreamTarget{}, ErrUnknownStream
@@ -93,9 +94,11 @@ func (s *Service) OpenStream(ctx context.Context, sourceID, channelID string) (S
 	}
 	s.storeStream(spec, target, until)
 	if u, err := url.Parse(target.Redirect); err == nil && u.Host != "" {
-		slog.Info("tve playback ready", "source", spec.source, "channel", spec.channel, "host", u.Host)
+		slog.Info("tve playback ready", "source", spec.source, "channel", spec.channel, "host", u.Host, "status", http.StatusFound)
+		s.notePlayback(spec.source, spec.channel, http.StatusFound, "ready "+u.Host)
 	} else if len(target.Body) > 0 {
-		slog.Info("tve playback ready", "source", spec.source, "channel", spec.channel, "proxy", true)
+		slog.Info("tve playback ready", "source", spec.source, "channel", spec.channel, "proxy", true, "status", http.StatusOK)
+		s.notePlayback(spec.source, spec.channel, http.StatusOK, "ready proxied playlist")
 	}
 	return target, nil
 }
@@ -156,7 +159,28 @@ func (s *Service) logPlay(spec playSpec, err error) {
 	if errors.As(err, &pe) {
 		status = pe.Status
 	}
-	slog.Warn("tve playback failed", "source", spec.source, "channel", spec.channel, "status", status, "err", redact(err.Error(), secrets...))
+	if status == 0 {
+		status = http.StatusServiceUnavailable
+	}
+	detail := redact(err.Error(), secrets...)
+	slog.Warn("tve playback failed", "source", spec.source, "channel", spec.channel, "status", status, "err", detail)
+	s.notePlayback(spec.source, spec.channel, status, detail)
+}
+
+func (s *Service) notePlayback(source, channel string, status int, detail string) {
+	s.mu.Lock()
+	s.playback = fmt.Sprintf("%s/%s HTTP %d %s", source, channel, status, detail)
+	s.mu.Unlock()
+}
+
+func (s *Service) logStep(spec playSpec, step, method, rawURL string, status int) {
+	u, err := url.Parse(rawURL)
+	host, path := rawURL, ""
+	if err == nil {
+		host = u.Host
+		path = u.Path
+	}
+	slog.Info("tve playback step", "source", spec.source, "channel", spec.channel, "step", step, "method", method, "host", host, "path", path, "status", status)
 }
 
 func (s *Service) cachedStream(spec playSpec) (StreamTarget, bool) {

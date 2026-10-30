@@ -184,6 +184,30 @@ func TestPendingSignInIsNotRestarted(t *testing.T) {
 	}
 }
 
+func TestBrowserSessionSkipsScriptedLogin(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.json")
+	if err := saveState(path, State{
+		Signed:     true,
+		Method:     "browser",
+		Expires:    time.Now().Add(-time.Hour).UTC(),
+		AuthnToken: "<authnToken><simpleTokenExpires>2020/01/01 00:00:00 GMT</simpleTokenExpires></authnToken>",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(&config.Config{
+		TVESources:      []string{SourceAE, SourceAMC},
+		TVESessionFile:  path,
+		DirectvUsername: "viewer@example.com",
+		DirectvPassword: "s3cret-password",
+	})
+	svc.client = offlineClient(t)
+	svc.refresh(context.Background())
+	view := svc.SignIn()
+	if view.Method != "browser" || strings.Contains(view.Notice, "scripted password login was not started") {
+		t.Fatalf("%+v", view)
+	}
+}
+
 func TestStoredSignInIsReused(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.json")
 	if err := saveState(path, State{Signed: true, FinalURL: "https://sp.auth.adobe.com/done"}); err != nil {

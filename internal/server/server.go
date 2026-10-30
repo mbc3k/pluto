@@ -91,6 +91,7 @@ func newServer(c *cache.Cache, tuners []Tuner, cfg *config.Config, version strin
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/style.css", s.handleCSS)
 	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/version", s.handleVersion)
 	mux.HandleFunc("/status", s.handleStatus)
 	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/epg.xml", s.handleEPG)
@@ -156,7 +157,7 @@ func securityHeaders(next http.Handler) http.Handler {
 // routes. An empty token leaves every route open. Channels DVR cannot send
 // an Authorization header, so the secret is accepted as ?token= or as a
 // /t/<token>/ prefix. Either match is enough, and a valid prefix is stripped
-// once. /health, /metrics, /status, and / stay open so an operator can see
+// once. /health, /version, /metrics, /status, and / stay open so an operator can see
 // whether the process is up and copy a URL that already includes the secret.
 func (s *Server) gate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -367,6 +368,12 @@ func (s *Server) handleEPG(w http.ResponseWriter, r *http.Request) {
 	writeBody(w, r, "application/xml; charset=utf-8", data, updated)
 }
 
+func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	fmt.Fprintf(w, "version %s\ncommit %s\n", displayVersion(s.version), Commit())
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if !s.authReady.Load() {
@@ -455,8 +462,11 @@ func (s *Server) handleTVE(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		target, err := s.tve.OpenStream(r.Context(), parts[0], parts[1])
+		sourceID, channelID := parts[0], parts[1]
+		slog.Info("tve stream request", "source", sourceID, "channel", channelID)
+		target, err := s.tve.OpenStream(r.Context(), sourceID, channelID)
 		if errors.Is(err, tve.ErrUnknownStream) {
+			slog.Info("tve stream", "source", sourceID, "channel", channelID, "status", http.StatusNotFound, "detail", err.Error())
 			http.NotFound(w, r)
 			return
 		}
@@ -467,19 +477,27 @@ func (s *Server) handleTVE(w http.ResponseWriter, r *http.Request) {
 			if errors.As(err, &pe) && pe.Status != 0 {
 				status = pe.Status
 			}
+			slog.Info("tve stream", "source", sourceID, "channel", channelID, "status", status, "detail", err.Error())
 			http.Error(w, err.Error(), status)
 			return
 		}
 		if len(target.Body) > 0 {
+			slog.Info("tve stream", "source", sourceID, "channel", channelID, "status", http.StatusOK, "bytes", len(target.Body))
 			w.Header().Set("Content-Type", "application/x-mpegurl")
 			w.Header().Set("Content-Length", strconv.Itoa(len(target.Body)))
 			_, _ = w.Write(target.Body)
 			return
 		}
 		if target.Redirect == "" {
+			slog.Info("tve stream", "source", sourceID, "channel", channelID, "status", http.StatusBadGateway, "detail", "no stream URL")
 			http.Error(w, "playback: no stream URL", http.StatusBadGateway)
 			return
 		}
+		host := target.Redirect
+		if u, err := url.Parse(target.Redirect); err == nil && u.Host != "" {
+			host = u.Host
+		}
+		slog.Info("tve stream", "source", sourceID, "channel", channelID, "status", http.StatusFound, "host", host)
 		http.Redirect(w, r, target.Redirect, http.StatusFound)
 	default:
 		http.NotFound(w, r)
@@ -639,6 +657,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	status := map[string]any{
 		"version":       s.version,
+		"commit":        Commit(),
 		"ready":         s.cache.IsReady(),
 		"auth_ready":    s.authReady.Load(),
 		"last_updated":  formatTime(updated),
@@ -689,6 +708,9 @@ func (s *Server) tveStatus(base string) map[string]any {
 	}
 	if view.Renewal != "" {
 		out["renewal"] = view.Renewal
+	}
+	if view.Playback != "" {
+		out["playback"] = view.Playback
 	}
 	out["activation"] = view.Waiting
 	for _, link := range s.tve.List() {

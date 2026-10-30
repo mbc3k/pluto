@@ -151,6 +151,17 @@ func TestPlaylistAndEPG(t *testing.T) {
 	}
 }
 
+func TestVersionNamesTheBuild(t *testing.T) {
+	s := newTestServer(t, nil, false)
+	rr := do(s, http.MethodGet, "/version", nil)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "version v1.2.3\n") || !strings.Contains(rr.Body.String(), "commit ") {
+		t.Fatalf("version %d %q", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("cache %s", rr.Header().Get("Cache-Control"))
+	}
+}
+
 func TestStatusAndIndex(t *testing.T) {
 	fake := &fakeTuner{token: "t", gen: 1}
 	s := newTestServer(t, []Tuner{fake, &fakeTuner{token: "t2", gen: 1}}, false)

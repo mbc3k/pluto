@@ -333,6 +333,80 @@ func TestFoxSportsRejectsAnonymousDevice(t *testing.T) {
 	}
 }
 
+func TestAMCRefreshUsesRefreshToken(t *testing.T) {
+	var sawRefresh atomic.Bool
+	srv := httptest.NewServer(playHandler(t, new(atomic.Int32), func(w http.ResponseWriter, r *http.Request) bool {
+		switch r.URL.Path {
+		case "/auth-orchestration-id/api/v1/unauth":
+			fmt.Fprint(w, `{"data":{"access_token":"access-1","refresh_token":"refresh-1","cache_hash":"Y2FjaGU","user_cache_hash":"dXNlcg"}}`)
+			return true
+		case "/auth-orchestration-id/api/v1/refresh":
+			if r.Header.Get("Authorization") != "Bearer refresh-1" {
+				t.Errorf("refresh authorization %q", r.Header.Get("Authorization"))
+			}
+			if r.Header.Get("X-Amcn-Cache-Hash") != "Y2FjaGU" {
+				t.Errorf("refresh cache hash %q", r.Header.Get("X-Amcn-Cache-Hash"))
+			}
+			sawRefresh.Store(true)
+			fmt.Fprint(w, `{"data":{"access_token":"access-2","cache_hash":"bmV4dA","user_cache_hash":"bmV4dHU"}}`)
+			return true
+		case "/auth-orchestration-id/api/v1/mvpd-auth":
+			if r.Header.Get("Authorization") != "Bearer access-2" {
+				t.Errorf("mvpd authorization %q", r.Header.Get("Authorization"))
+			}
+			fmt.Fprint(w, `{"data":{"access_token":"mvpd-1"}}`)
+			return true
+		case "/playback-id/api/v1/livestream/6398764467112":
+			fmt.Fprint(w, `{"sources":[{"src":"https://cdn.example/amc.m3u8"}]}`)
+			return true
+		default:
+			return false
+		}
+	}))
+	defer srv.Close()
+	svc := newPlayService(t, SourceAMC, "pw")
+	wirePlay(t, svc, srv)
+	target, err := svc.OpenStream(context.Background(), SourceAMC, "amc")
+	if err != nil || target.Redirect != "https://cdn.example/amc.m3u8" || !sawRefresh.Load() {
+		t.Fatalf("target %#v err %v refresh %v", target, err, sawRefresh.Load())
+	}
+	if !strings.Contains(svc.SignIn().Playback, "amcn/amc HTTP 302") {
+		t.Fatalf("status playback %q", svc.SignIn().Playback)
+	}
+}
+
+func TestAMCRefreshUnauthorizedStillPlays(t *testing.T) {
+	srv := httptest.NewServer(playHandler(t, new(atomic.Int32), func(w http.ResponseWriter, r *http.Request) bool {
+		switch r.URL.Path {
+		case "/auth-orchestration-id/api/v1/unauth":
+			fmt.Fprint(w, `{"data":{"access_token":"access-1","refresh_token":"refresh-1"}}`)
+			return true
+		case "/auth-orchestration-id/api/v1/refresh":
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprint(w, `{"message":"expired"}`)
+			return true
+		case "/auth-orchestration-id/api/v1/mvpd-auth":
+			if r.Header.Get("Authorization") != "Bearer access-1" {
+				t.Errorf("mvpd authorization %q", r.Header.Get("Authorization"))
+			}
+			fmt.Fprint(w, `{"data":{"access_token":"mvpd-1"}}`)
+			return true
+		case "/playback-id/api/v1/livestream/6398764467112":
+			fmt.Fprint(w, `{"sources":[{"src":"https://cdn.example/amc.m3u8"}]}`)
+			return true
+		default:
+			return false
+		}
+	}))
+	defer srv.Close()
+	svc := newPlayService(t, SourceAMC, "pw")
+	wirePlay(t, svc, srv)
+	target, err := svc.OpenStream(context.Background(), SourceAMC, "amc")
+	if err != nil || target.Redirect != "https://cdn.example/amc.m3u8" {
+		t.Fatalf("target %#v err %v", target, err)
+	}
+}
+
 func TestMissingSignInDoesNotCallAdobe(t *testing.T) {
 	svc := NewService(&config.Config{
 		TVESources:     []string{SourceAMC},
@@ -342,6 +416,9 @@ func TestMissingSignInDoesNotCallAdobe(t *testing.T) {
 	_, err := svc.OpenStream(context.Background(), SourceAMC, "amc")
 	if err == nil || !strings.Contains(err.Error(), "directv sign-in") || !strings.Contains(err.Error(), "DirecTV") {
 		t.Fatalf("%v", err)
+	}
+	if !strings.Contains(svc.SignIn().Playback, "amcn/amc HTTP 503") {
+		t.Fatalf("status playback %q", svc.SignIn().Playback)
 	}
 }
 
@@ -357,10 +434,10 @@ func playHandler(t *testing.T, authorize *atomic.Int32, extra func(http.Response
 	t.Helper()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if extra != nil && extra(w, r) {
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/api/v2/") {
-			if extra != nil && extra(w, r) {
-				return
-			}
 			w.WriteHeader(http.StatusNotFound)
 			fmt.Fprint(w, `{"message":"no decision"}`)
 			return
@@ -376,9 +453,6 @@ func playHandler(t *testing.T, authorize *atomic.Int32, extra func(http.Response
 		case "/auth-orchestration-id/api/v1/unauth", "/auth-orchestration-id/api/v1/refresh", "/auth-orchestration-id/api/v1/mvpd-auth":
 			fmt.Fprint(w, `{"data":{"access_token":"amc-bearer"}}`)
 		default:
-			if extra != nil && extra(w, r) {
-				return
-			}
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
 		}

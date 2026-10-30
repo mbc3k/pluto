@@ -41,6 +41,9 @@ type SignInView struct {
 	// without a browser, "retrying" when that refresh is backing off, and
 	// "needs_browser" when only a person can extend the DirecTV login.
 	Renewal string
+	// Playback is the last /stream result, safe to show on /status.
+	// It names the source, channel, HTTP status, and failing step.
+	Playback string
 }
 
 // Service refreshes enabled TV Everywhere sources and remembers a DirecTV
@@ -59,10 +62,11 @@ type Service struct {
 	turnerStatementURL  string
 	endpoints           Endpoints
 
-	mu     sync.Mutex
-	signMu sync.Mutex
-	feeds  map[string]source.Feed
-	signIn SignInView
+	mu       sync.Mutex
+	signMu   sync.Mutex
+	feeds    map[string]source.Feed
+	signIn   SignInView
+	playback string
 
 	renewNext    time.Time
 	renewDelay   time.Duration
@@ -109,6 +113,7 @@ func NewService(cfg *config.Config) *Service {
 		slog.Warn("tve session was not loaded", "err", err)
 	} else {
 		s.applyState(st)
+		slog.Info("tve session loaded", "signed_in", st.Signed, "method", st.Method, "authn", strings.TrimSpace(st.AuthnToken) != "")
 	}
 	return s
 }
@@ -192,7 +197,9 @@ func (s *Service) Guide(id string) ([]byte, time.Time, bool) {
 func (s *Service) SignIn() SignInView {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.signIn
+	view := s.signIn
+	view.Playback = s.playback
+	return view
 }
 
 // SubmitCode continues a DirecTV login that stopped for a code or a menu choice.
@@ -621,11 +628,16 @@ func (s *Service) setNotice(msg string) {
 	s.mu.Unlock()
 }
 
+func storedDirecTVSession(st State) bool {
+	return st.Method == "browser" || st.Method == "token" || strings.TrimSpace(st.AuthnToken) != ""
+}
+
 func (s *Service) trySignInLocked(ctx context.Context) {
 	st, err := loadState(s.sessionPath)
 	if err != nil {
 		slog.Warn("tve session", "err", err)
-		st = State{}
+		s.setSignIn(SignInView{Notice: "The DirecTV session file could not be read, so the scripted password login was not started."})
+		return
 	}
 	if st.Activation != nil {
 		s.pollActivationLocked(ctx, st)
@@ -635,14 +647,15 @@ func (s *Service) trySignInLocked(ctx context.Context) {
 		s.applyState(st)
 		return
 	}
-	if st.Signed || st.AuthnToken != "" {
+	if storedDirecTVSession(st) || st.Signed {
 		s.maintainAuthn(ctx, &st)
 		if authnCurrent(st) {
 			s.applyState(st)
 			return
 		}
-		if st.AuthnToken != "" {
+		if storedDirecTVSession(st) {
 			s.noteAuthnExpired(st)
+			slog.Info("directv scripted sign-in skipped", "method", st.Method, "reason", "stored session")
 			return
 		}
 	}
@@ -655,6 +668,7 @@ func (s *Service) trySignInLocked(ctx context.Context) {
 		s.setSignIn(SignInView{Notice: "None of the enabled sources start a scripted DirecTV sign-in. Public stream URLs are served as-is. Browser sign-in is on the DirecTV page."})
 		return
 	}
+	slog.Info("directv scripted sign-in starting", "reason", "no authentication token in the session file")
 	html, finalURL, sess, err := s.fetchSignInPage(ctx)
 	if err != nil {
 		slog.Error("directv sign-in did not start", "err", redact(err.Error(), s.password, s.user))
