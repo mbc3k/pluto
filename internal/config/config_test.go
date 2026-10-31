@@ -14,8 +14,6 @@ func clearConfigEnv(t *testing.T) {
 		"PLUTO_EMAIL", "PLUTO_PASSWORD", "PLUTO_CONFIG",
 		"PORT", "START_CHANNEL", "TUNER_COUNT", "DEVICE_ID_FILE",
 		"BIND_ADDR", "ACCESS_TOKEN", "REFRESH_EVERY", "GUIDE_HOURS",
-		"TVE_SOURCES", "TVE_PROVIDER", "TVE_COMBINED",
-		"TVE_START_CHANNEL", "TVE_SESSION_FILE", "DIRECTV_USERNAME", "DIRECTV_PASSWORD",
 	} {
 		t.Setenv(k, "")
 	}
@@ -57,15 +55,6 @@ func TestLoadDefaultsAndValidation(t *testing.T) {
 	}
 	if cfg.ListenAddr() != ":8080" {
 		t.Fatalf("listen %s", cfg.ListenAddr())
-	}
-	if cfg.TVEProvider != "" || len(cfg.TVESources) != 0 || !cfg.TVECombined {
-		t.Fatalf("tve defaults: %+v", cfg)
-	}
-	if cfg.TVEStartChannel != 20000 || cfg.TVESessionFile != "/opt/local/etc/pluto-tve-session.json" {
-		t.Fatalf("tve session defaults: %+v", cfg)
-	}
-	if cfg.DirectvUsername != "" || cfg.DirectvPassword != "" {
-		t.Fatal("directv credentials should default empty")
 	}
 
 	t.Setenv("PORT", "0")
@@ -265,50 +254,13 @@ func TestLoadOpsKnobsFromFile(t *testing.T) {
 	}
 }
 
-func TestLoadTVEAndAccessToken(t *testing.T) {
+func TestLoadAccessToken(t *testing.T) {
 	clearConfigEnv(t)
 	t.Setenv("PLUTO_EMAIL", "user@example.com")
 	t.Setenv("PLUTO_PASSWORD", "secret")
-	t.Setenv("TVE_SOURCES", "fox, aenetworks, fox, discovery")
-	t.Setenv("DIRECTV_USERNAME", " viewer ")
-	t.Setenv("DIRECTV_PASSWORD", " keep spaces ")
-	t.Setenv("TVE_SESSION_FILE", "/data/tve.json")
-	cfg, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Join(cfg.TVESources, ",") != "fox,aenetworks,discovery" {
-		t.Fatalf("sources %v", cfg.TVESources)
-	}
-	if cfg.TVEProvider != "dtv" || !cfg.TVECombined || cfg.TVEStartChannel != 20000 {
-		t.Fatalf("provider defaults %+v", cfg)
-	}
-	if cfg.DirectvUsername != "viewer" || cfg.DirectvPassword != " keep spaces " {
-		t.Fatalf("directv creds username %q password %q", cfg.DirectvUsername, cfg.DirectvPassword)
-	}
-	if cfg.TVESessionFile != "/data/tve.json" {
-		t.Fatalf("session %s", cfg.TVESessionFile)
-	}
-
-	t.Setenv("TVE_COMBINED", "false")
-	t.Setenv("TVE_PROVIDER", "xfinity")
-	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "TVE_PROVIDER") {
-		t.Fatalf("expected provider error, got %v", err)
-	}
-	t.Setenv("TVE_PROVIDER", "dtv")
-	t.Setenv("TVE_SOURCES", "nbc")
-	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "unknown source") {
-		t.Fatalf("expected unknown source, got %v", err)
-	}
-	t.Setenv("TVE_SOURCES", "fox")
-	t.Setenv("TVE_START_CHANNEL", "-1")
-	if _, err := Load(); err == nil {
-		t.Fatal("expected negative tve start channel to be rejected")
-	}
-	t.Setenv("TVE_START_CHANNEL", "21000")
 	secret := "bad/token-value"
 	t.Setenv("ACCESS_TOKEN", secret)
-	_, err = Load()
+	_, err := Load()
 	if err == nil || strings.Contains(err.Error(), secret) {
 		t.Fatalf("token error leaked or was missing: %v", err)
 	}
@@ -317,12 +269,12 @@ func TestLoadTVEAndAccessToken(t *testing.T) {
 		t.Fatalf("expected length error, got %v", err)
 	}
 	t.Setenv("ACCESS_TOKEN", "good-token")
-	cfg, err = Load()
+	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AccessToken != "good-token" || cfg.TVECombined || cfg.TVEStartChannel != 21000 {
-		t.Fatalf("parsed tve %+v", cfg)
+	if cfg.AccessToken != "good-token" {
+		t.Fatalf("token %q", cfg.AccessToken)
 	}
 }
 

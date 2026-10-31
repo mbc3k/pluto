@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -36,23 +35,16 @@ var defaultConfPaths = []string{
 
 // Config holds all runtime configuration for the pluto service.
 type Config struct {
-	Email           string
-	Password        string
-	StartChannel    int
-	Port            int
-	BindAddr        string // host or IP only; empty listens on all interfaces
-	AccessToken     string // empty leaves playlist and EPG URLs open
-	TunerCount      int
-	RefreshEvery    time.Duration
-	GuideHours      int
-	DeviceIDFile    string
-	TVESources      []string
-	TVEProvider     string
-	TVECombined     bool
-	TVEStartChannel int
-	TVESessionFile  string
-	DirectvUsername string
-	DirectvPassword string
+	Email        string
+	Password     string
+	StartChannel int
+	Port         int
+	BindAddr     string // host or IP only; empty listens on all interfaces
+	AccessToken  string // empty leaves playlist and EPG URLs open
+	TunerCount   int
+	RefreshEvery time.Duration
+	GuideHours   int
+	DeviceIDFile string
 }
 
 // ListenAddr is the address passed to net.Listen. An empty BindAddr keeps
@@ -151,36 +143,6 @@ func Load() (*Config, error) {
 	if cfg.GuideHours, err = parseGuideHours(get("GUIDE_HOURS")); err != nil {
 		return nil, err
 	}
-	if cfg.TVESources, err = parseTVESources(get("TVE_SOURCES")); err != nil {
-		return nil, err
-	}
-	cfg.TVEProvider = strings.ToLower(strings.TrimSpace(get("TVE_PROVIDER")))
-	if cfg.TVEProvider == "" && len(cfg.TVESources) > 0 {
-		cfg.TVEProvider = "dtv"
-	}
-	if cfg.TVEProvider != "" && cfg.TVEProvider != "dtv" {
-		return nil, fmt.Errorf("TVE_PROVIDER %q is not supported; this build signs in with DirecTV (dtv)", cfg.TVEProvider)
-	}
-	cfg.TVECombined = true
-	if s := strings.TrimSpace(get("TVE_COMBINED")); s != "" {
-		combined, err := strconv.ParseBool(s)
-		if err != nil {
-			return nil, fmt.Errorf("TVE_COMBINED: %w", err)
-		}
-		cfg.TVECombined = combined
-	}
-	if cfg.TVEStartChannel, err = getInt("TVE_START_CHANNEL", 20000); err != nil {
-		return nil, err
-	}
-	if cfg.TVEStartChannel < 0 {
-		return nil, fmt.Errorf("TVE_START_CHANNEL must be >= 0, got %d", cfg.TVEStartChannel)
-	}
-	cfg.DirectvUsername = strings.TrimSpace(get("DIRECTV_USERNAME"))
-	cfg.DirectvPassword = get("DIRECTV_PASSWORD")
-	cfg.TVESessionFile = strings.TrimSpace(get("TVE_SESSION_FILE"))
-	if cfg.TVESessionFile == "" {
-		cfg.TVESessionFile = filepath.Join(filepath.Dir(cfg.DeviceIDFile), "pluto-tve-session.json")
-	}
 
 	return cfg, nil
 }
@@ -203,39 +165,6 @@ func normalizeBindAddr(s string) (string, error) {
 		return "", fmt.Errorf("BIND_ADDR is not a host")
 	}
 	return s, nil
-}
-
-// Known TVE source ids. Kept here so configuration rejects typos before the
-// process listens. The lineup for each id lives in internal/tve.
-var knownTVESources = map[string]struct{}{
-	"aenetworks": {},
-	"amcn":       {},
-	"warner":     {},
-	"fox":        {},
-	"discovery":  {},
-}
-
-func parseTVESources(s string) ([]string, error) {
-	if strings.TrimSpace(s) == "" {
-		return nil, nil
-	}
-	var out []string
-	seen := map[string]struct{}{}
-	for _, part := range strings.Split(s, ",") {
-		id := strings.ToLower(strings.TrimSpace(part))
-		if id == "" {
-			continue
-		}
-		if _, ok := knownTVESources[id]; !ok {
-			return nil, fmt.Errorf("TVE_SOURCES: unknown source %q", id)
-		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		out = append(out, id)
-	}
-	return out, nil
 }
 
 // normalizeAccessToken accepts an empty token (gate off) or a short secret

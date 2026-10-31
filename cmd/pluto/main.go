@@ -26,7 +26,7 @@ var version = "dev"
 
 func main() {
 	setupLogger()
-	slog.Info("pluto starting", "version", version)
+	slog.Info("pluto starting", "version", version, "commit", server.Commit())
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -90,16 +90,6 @@ func main() {
 		defer wg.Done()
 		scheduler.Run(ctx, sessions, c, cfg, client, srv.Metrics())
 	}()
-
-	// TV Everywhere guides refresh on the same interval. Disabled unless
-	// TVE_SOURCES is set, and a failed sign-in leaves the lineup in place.
-	if bg := srv.TVE(); bg != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			bg.Run(ctx)
-		}()
-	}
 
 	// Block until signal.
 	<-ctx.Done()

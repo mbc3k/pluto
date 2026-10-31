@@ -267,10 +267,6 @@ button.epg-button {
   font-family: inherit;
 }
 
-.tve-link {
-  color: var(--accent-yellow);
-}
-
 /* Setup Instructions */
 .setup-section {
   background: var(--bg-card);
